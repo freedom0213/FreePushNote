@@ -196,6 +196,6 @@ def push(path: str | Path, *, helper: str = '!gh auth git-credential',
     log('   你的改动已经提交到本地仓库，不会丢失。')
     log('   常见原因：')
     log('     1) 网络 / 代理抖动 —— 过一会儿再点一次「Push」，会自动补上。')
-    log('     2) 代理软件没开 —— 本机 git 走 http.proxy=127.0.0.1:65532，确认它在运行。')
+    log('     2) 代理软件没开 —— git 若配了 http.proxy，确认它在运行。')
     log('     3) 远端有新提交 —— 需要先拉取合并（本工具暂不自动合并）。')
     return False, retries

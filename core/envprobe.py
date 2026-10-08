@@ -9,7 +9,7 @@
 
 2. **``gh`` 需要显式注入代理。**
    ``gh``（Go 编写）**不读 git 的配置**，只认环境变量 ``HTTP_PROXY`` / ``HTTPS_PROXY``；
-   而 git 自己的 ``http.proxy``（用户的代理软件，本机为 127.0.0.1:65532）是另一套、
+   而 git 自己的 ``http.proxy``（用户自己的代理软件，形式如 127.0.0.1:<port>）是另一套、
    且是可用的。所以要把 git 的 http.proxy 取出来，显式塞给子进程环境。
 """
 from __future__ import annotations

@@ -128,14 +128,14 @@ def test_envprobe() -> None:
 
     fake = {'http_proxy': 'http://127.0.0.1:1', 'HTTPS_PROXY': 'http://127.0.0.1:1',
             'NO_PROXY': 'localhost', 'PATH': 'x'}
-    env = envprobe.clean_env(base=fake, proxy='http://127.0.0.1:65532')
+    env = envprobe.clean_env(base=fake, proxy='http://127.0.0.1:7890')
     proxy_keys = sorted(k.upper() for k in env if k.lower().endswith('proxy'))
     check('代理键只剩干净的两个（旧值全被清掉）',
           set(proxy_keys) == {'HTTP_PROXY', 'HTTPS_PROXY'}, str(proxy_keys))
     check('旧 NO_PROXY 已清除',
           'NO_PROXY' not in {k.upper() for k in env})
     check('保留其它变量', env.get('PATH') == 'x')
-    check('显式注入代理', env.get('HTTP_PROXY') == 'http://127.0.0.1:65532')
+    check('显式注入代理', env.get('HTTP_PROXY') == 'http://127.0.0.1:7890')
 
     env2 = envprobe.clean_env(base=fake, proxy='')
     check('proxy 传空串时不注入', 'HTTP_PROXY' not in env2)
