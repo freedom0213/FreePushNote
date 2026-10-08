@@ -11,13 +11,34 @@ GitHub 的绑定与推送在阶段 2 接入，目前 Push 会给出明确提示�
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame, QHBoxLayout,
                                QInputDialog, QLabel, QMessageBox, QStackedWidget,
-                               QVBoxLayout, QWidget)
+                               QToolButton, QVBoxLayout, QWidget)
+
+# ── Windows 专用：让系统自己回答「这个点在窗口的哪个部位」 ──
+#
+# 之前的做法是在 Qt 层算边缘、再调 `startSystemResize()`。那套在实机上不灵：
+# 光标会变（说明事件确实到了主窗口），但按住拖动毫无反应。
+#
+# 换成 `WM_NCHITTEST` 之后，命中测试由 Windows 亲自做：
+#   * 光标形状由系统给（四角八边全都准）
+#   * 拖拽缩放由系统接管（跟手、能贴边、不依赖 Qt 的事件传递路径）
+#   * **不受子控件遮挡影响** —— 系统问的是窗口本身，不是窗口里的哪个控件
+#
+# 这是无边框窗口在 Windows 上最靠谱的做法。
+_IS_WINDOWS = sys.platform == 'win32'
+if _IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    _WM_NCHITTEST = 0x0084
+    _HTLEFT, _HTRIGHT, _HTTOP, _HTTOPLEFT, _HTTOPRIGHT = 10, 11, 12, 13, 14
+    _HTBOTTOM, _HTBOTTOMLEFT, _HTBOTTOMRIGHT = 15, 16, 17
 
 from core import config as core_config
 
@@ -63,7 +84,9 @@ class _EmptyState(QWidget):
 
 
 class FreePushWindow(QWidget):
-    RESIZE_MARGIN = 6
+    # 判定为「窗口边缘」的宽度。8px 比 Windows 默认的 4px 宽一倍 ——
+    # 无边框窗口没有系统边框做视觉提示，太窄了根本瞄不准。
+    RESIZE_MARGIN = 8
 
     def __init__(self) -> None:
         super().__init__()
@@ -71,12 +94,13 @@ class FreePushWindow(QWidget):
         self.setWindowIcon(icons.app_icon())
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        # Windows 走 WM_NCHITTEST，不需要预留可拖拽边；其他平台靠这圈边距让 Qt 收到事件
+        self._inset = 0 if _IS_WINDOWS else self.RESIZE_MARGIN
+
         self.setMinimumSize(theme.WIN_MIN_W, theme.WIN_MIN_H)
-        self.resize(theme.WIN_W + 2 * self.RESIZE_MARGIN,
-                    theme.WIN_H + 2 * self.RESIZE_MARGIN)
+        self.resize(theme.WIN_W + 2 * self._inset, theme.WIN_H + 2 * self._inset)
         self.setAcceptDrops(True)
-        # 不开 mouseTracking 的话，鼠标「不按键」掠过边缘时收不到 mouseMoveEvent，
-        # 光标就不会变成缩放箭头
+        # 非 Windows 时靠它拿到「不按键掠过」的 mouseMoveEvent
         self.setMouseTracking(True)
 
         # 运行态
@@ -106,7 +130,7 @@ class FreePushWindow(QWidget):
         # 不留的话，这一圈会被内容容器完全盖住，主窗口收不到任何鼠标事件 ——
         # 这就是上一版「鼠标移到边缘拖不动」的根因。
         self._outer = QVBoxLayout(self)
-        self._outer.setContentsMargins(*([self.RESIZE_MARGIN] * 4))
+        self._outer.setContentsMargins(*([self._inset] * 4))
 
         self._root = QFrame()
         self._root.setObjectName('Root')
@@ -444,8 +468,11 @@ class FreePushWindow(QWidget):
             self.showMaximized()
 
     def _apply_resize_margins(self) -> None:
-        """最大化 / 全屏时不留那圈透明边，否则内容会凭空缩进一圈。"""
-        m = 0 if (self.isMaximized() or self.isFullScreen()) else self.RESIZE_MARGIN
+        """最大化 / 全屏时不留那圈透明边，否则内容会凭空缩进一圈。
+
+        Windows 上 ``_inset`` 恒为 0 —— 命中测试交给系统，不需要预留可拖拽区。
+        """
+        m = 0 if (self.isMaximized() or self.isFullScreen()) else self._inset
         self._outer.setContentsMargins(m, m, m, m)
 
     def changeEvent(self, event) -> None:  # noqa: N802
@@ -596,6 +623,61 @@ class FreePushWindow(QWidget):
                 break
 
     # ───────────────────────── 无边框窗口缩放 ─────────────────────────
+
+    def nativeEvent(self, event_type, message):  # noqa: N802
+        """Windows：用 ``WM_NCHITTEST`` 把边缘判定交还给系统。
+
+        一旦返回 ``HTLEFT`` / ``HTTOPRIGHT`` 这类命中代码，Windows 就自己接管光标形状
+        与拖拽缩放。这比在 Qt 层算坐标可靠得多，而且**不受子控件遮挡影响** ——
+        系统问的是「窗口的哪个部位」，而不是「窗口里哪个控件收到了鼠标」。
+        """
+        if _IS_WINDOWS and event_type == b'windows_generic_MSG':
+            msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
+            if msg.message == _WM_NCHITTEST:
+                hit = self._hit_test(int(msg.lParam))
+                if hit is not None:
+                    return True, hit
+        return super().nativeEvent(event_type, message)
+
+    def _hit_test(self, lparam: int) -> int | None:
+        """把鼠标位置翻译成 Windows 的命中代码；不在边缘时返回 ``None``（交回 Qt）。"""
+        if self.isMaximized() or self.isFullScreen():
+            return None
+
+        # lParam 的低 16 位是 x、高 16 位是 y，均为**屏幕物理像素**
+        x = ctypes.c_short(lparam & 0xFFFF).value
+        y = ctypes.c_short((lparam >> 16) & 0xFFFF).value
+
+        # Qt 给的窗口位置 / 尺寸是逻辑像素，乘回设备像素比才能与上面比较
+        dpr = self.devicePixelRatioF() or 1.0
+        left = round(self.x() * dpr)
+        top = round(self.y() * dpr)
+        right = left + round(self.width() * dpr)
+        bottom = top + round(self.height() * dpr)
+        m = round(self.RESIZE_MARGIN * dpr)
+
+        on_left = x < left + m
+        on_right = x >= right - m
+        on_top = y < top + m
+        on_bottom = y >= bottom - m
+        if not (on_left or on_right or on_top or on_bottom):
+            return None
+
+        if on_top and on_left:
+            return _HTTOPLEFT
+        if on_top and on_right:
+            return _HTTOPRIGHT
+        if on_bottom and on_left:
+            return _HTBOTTOMLEFT
+        if on_bottom and on_right:
+            return _HTBOTTOMRIGHT
+        if on_left:
+            return _HTLEFT
+        if on_right:
+            return _HTRIGHT
+        if on_top:
+            return _HTTOP
+        return _HTBOTTOM
 
     def _edge_at(self, pos: QPoint) -> Qt.Edges | None:
         m = self.RESIZE_MARGIN
