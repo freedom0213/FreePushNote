@@ -52,7 +52,7 @@ DEFAULT_SCOPE = 'repo read:user'
 #: 任何用这个软件的人授权时，GitHub 上显示的都是同一个应用名。
 #: 留空表示尚未配置，此时所有认证动作都会报「未配置」而不是静默失败。
 #: 也可以通过环境变量 FREEPUSH_GITHUB_CLIENT_ID 或配置项 oauth_client_id 覆盖。
-DEFAULT_CLIENT_ID = ''
+DEFAULT_CLIENT_ID = 'Ov23libaFpw8rEdsDUhh'
 
 CLIENT_ID_ENV = 'FREEPUSH_GITHUB_CLIENT_ID'
 

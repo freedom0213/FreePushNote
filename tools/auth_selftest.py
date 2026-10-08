@@ -60,6 +60,14 @@ def expect_auth_error(name: str, kind: str, fn) -> None:
         check(f'{name} → {kind}', False, '没有抛出异常')
 
 
+def _raises(fn) -> bool:
+    try:
+        fn()
+    except Exception:  # noqa: BLE001
+        return True
+    return False
+
+
 # ───────────────────────── 测试替身 ─────────────────────────
 
 class FakeClock:
@@ -143,9 +151,17 @@ def test_client_id() -> None:
     finally:
         os.environ.pop(ghauth.CLIENT_ID_ENV, None)
 
-    if not ghauth.DEFAULT_CLIENT_ID:
+    # 「未配置 client_id」这条分支：内置常量现在有值了，临时清空来验证它仍然可达
+    # （将来有人把 DEFAULT_CLIENT_ID 留空时，这里就是唯一的保障）
+    saved = ghauth.DEFAULT_CLIENT_ID
+    ghauth.DEFAULT_CLIENT_ID = ''
+    try:
         expect_auth_error('未配置 client_id', ghauth.KIND_CONFIG,
                           lambda: ghauth.resolve_client_id(None))
+        check('空白 client_id 也算未配置',
+              _raises(lambda: ghauth.resolve_client_id('   ')))
+    finally:
+        ghauth.DEFAULT_CLIENT_ID = saved
 
 
 # ───────────────────────── 2. 申请设备码 ─────────────────────────
@@ -384,9 +400,13 @@ def test_end_to_end() -> None:
     check('总共只等了 2 个间隔', s.calls == [5.0, 5.0])
 
     # 缺少 client_id 时 authorize 应该在发请求之前就失败
-    if not ghauth.DEFAULT_CLIENT_ID:
+    saved = ghauth.DEFAULT_CLIENT_ID
+    ghauth.DEFAULT_CLIENT_ID = ''
+    try:
         expect_auth_error('未配置时 authorize 提前失败', ghauth.KIND_CONFIG,
                           lambda: ghauth.authorize(None, on_code=lambda _d: None))
+    finally:
+        ghauth.DEFAULT_CLIENT_ID = saved
 
 
 def main() -> int:

@@ -387,6 +387,70 @@ def qss() -> str:
         background: {BORDER};
         margin: 4px 2px;
     }}
+
+    /* ── 对话框（认证 / 纳管等） ─────────────────── */
+    QFrame#DialogCard {{
+        background: {BG_PANEL};
+        border: 1px solid {BORDER};
+        border-radius: {RADIUS_CARD}px;
+    }}
+    QFrame#DialogHeader {{
+        border-bottom: 1px solid {BORDER};
+    }}
+    /* 验证码：整个界面上唯一允许「大而显眼」的文字 */
+    QLabel#AuthCode {{
+        background: {BG_INPUT};
+        border: 1px solid {BORDER_STRONG};
+        border-radius: 6px;
+        color: {TEXT_STRONG};
+        font-family: {MONO_STACK};
+        font-size: 22px;
+        font-weight: 600;
+    }}
+    QFrame#AuthStep {{
+        background: {BG_CARD};
+        border: 1px solid {BORDER};
+        border-radius: 6px;
+    }}
+    QFrame#AuthError {{
+        background: {alpha(ERROR, 0.10)};
+        border: 1px solid #4A3A3A;
+        border-radius: 6px;
+    }}
+    QPushButton#PrimaryButton {{
+        background: {PRIMARY};
+        color: #FFFFFF;
+        border: none;
+        border-radius: 6px;
+        font-size: {FS_UI}px;
+        font-weight: 600;
+    }}
+    QPushButton#PrimaryButton:hover   {{ background: {PRIMARY_HOVER}; }}
+    QPushButton#PrimaryButton:pressed {{ background: {PRIMARY_PRESSED}; }}
+    QPushButton#PrimaryButton:disabled {{
+        background: #3A3A3C;
+        color: {TEXT_MUTED};
+        border: 1px solid {BORDER_STRONG};
+    }}
+    QPushButton#DialogButton {{
+        background: {BG_CARD};
+        color: {TEXT_BODY};
+        border: 1px solid {BORDER};
+        border-radius: 6px;
+        font-size: {FS_SMALL}px;
+        font-weight: 600;
+    }}
+    QPushButton#DialogButton:hover {{
+        background: {BG_HOVER};
+        border-color: {BORDER_STRONG};
+    }}
+    QToolButton#LinkButton {{
+        border: none;
+        background: transparent;
+        color: {TEXT_WEAK};
+        font-size: {FS_TINY}px;
+    }}
+    QToolButton#LinkButton:hover {{ color: {TEXT_SECOND}; }}
     """
 
 

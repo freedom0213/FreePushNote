@@ -333,8 +333,13 @@ class PushPanel(QFrame):
         self._status_desc.setText(desc or default_desc)
         self._status_card.set_danger(state == 'failed')
 
-    def set_push_state(self, state: str, text: str | None = None) -> None:
-        """``state``: disabled | ready | running | success | failed"""
+    def set_push_state(self, state: str, text: str | None = None,
+                       icon_name: str | None = None) -> None:
+        """``state``: disabled | ready | running | success | failed
+
+        ``icon_name`` 用于「按钮文案变了、图标也该跟着换」的场合
+        （例如未绑账号时按钮是「绑定 GitHub 账号」，配 GitHub 图标才不别扭）。
+        """
         labels = {
             'disabled': '打开一个文件后可推送',
             'ready': 'Push 到 GitHub',
@@ -347,18 +352,11 @@ class PushPanel(QFrame):
         self.push_button.style().unpolish(self.push_button)
         self.push_button.style().polish(self.push_button)
 
-        enabled = state in ('ready', 'failed')
-        self.push_button.setEnabled(enabled or state in ('running', 'success'))
-        if state == 'ready':
-            self.push_button.setIcon(icons.icon('push', '#FFFFFF', 16))
-        elif state == 'failed':
-            self.push_button.setIcon(icons.icon('push', '#FFFFFF', 16))
-        elif state == 'running':
-            self.push_button.setIcon(icons.icon('push', '#A6BDCD', 16))
-        elif state == 'success':
-            self.push_button.setIcon(icons.icon('check-circle', '#1E1E1E', 16))
-        else:
-            self.push_button.setIcon(icons.icon('push', theme.TEXT_MUTED, 16))
+        self.push_button.setEnabled(state in ('ready', 'failed', 'running', 'success'))
+        name = icon_name or ('check-circle' if state == 'success' else 'push')
+        color = {'running': '#A6BDCD', 'success': theme.BG_APP}.get(
+            state, '#FFFFFF' if state in ('ready', 'failed') else theme.TEXT_MUTED)
+        self.push_button.setIcon(icons.icon(name, color, 16))
         self._hotkey.setVisible(state in ('ready', 'failed'))
 
         for b in (self.btn_pull, self.btn_diff):

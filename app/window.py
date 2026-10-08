@@ -42,7 +42,8 @@ if _IS_WINDOWS:
 
 from core import config as core_config
 
-from . import fileio, icons, theme
+from . import account as account_mod, fileio, icons, theme
+from .widgets.authdialog import GitHubAuthDialog
 from .widgets.editor import CodeEditor
 from .widgets.panel import PanelRail, PushPanel
 from .widgets.sidebar import Sidebar, SidebarRail
@@ -109,6 +110,8 @@ class FreePushWindow(QWidget):
         self._eol = 'crlf'
         self._dirty = False
         self._recent: list[str] = self._load_recent()
+        # 已绑定的 GitHub 账号。「账号信息 + 令牌」两者都在才算，见 app/account.py
+        self._account = account_mod.session()
 
         self._build_ui()
         self._build_shortcuts()
@@ -364,21 +367,41 @@ class FreePushWindow(QWidget):
                                warn=self._eol == 'crlf')
 
     def _refresh_sync(self) -> None:
-        """阶段 1 只有两种状态；阶段 2 接入绑定后会扩展成完整的四象限。"""
+        """按「有没有绑账号 / 有没有打开文件」决定这一屏该说什么。
+
+        目前到「未绑定账号」和「未纳入管理」两档；等纳管流程与仓库绑定接上，
+        这里会扩展成完整的四象限（已同步 / 待推送 / 本地落后 / 分叉）。
+        """
+        if self._account is None:
+            # 账号都没绑，谈同步没有意义 —— 直接引导授权。
+            # 注意按钮文案要跟着换成「绑定 GitHub 账号」，且**必须可点**：
+            # 灰着不给任何反应是最糟的交互。
+            self.panel.set_sync_state('unlinked')
+            self.panel.set_push_state('ready', text='绑定 GitHub 账号',
+                                      icon_name='github')
+            self.statusbar.set_sync('unlinked')
+            self.rail.set_sync_state('unlinked')
+            return
+
         if self._editor_stack.currentIndex() != 1:
-            self.panel.set_sync_state('unmanaged')
+            self.panel.set_sync_state(
+                'unmanaged',
+                desc=f'已绑定 {self._account.login}。打开一个 txt 后，就能把它纳入管理。')
             self.panel.set_push_state('disabled')
             self.statusbar.set_sync('unmanaged')
             self.rail.set_sync_state('unmanaged')
             return
 
         state = 'pending' if self._dirty else 'unmanaged'
-        self.panel.set_sync_state(state)
         if self._dirty:
+            self.panel.set_sync_state(state)
             self.panel.set_push_state('ready')
         else:
             # 已打开、但还没纳入管理：按钮要能点，点了进纳管引导。
-            # 灰着不给任何反应是最糟的——用户会以为软件坏了。
+            self.panel.set_sync_state(
+                state,
+                desc=f'已绑定 {self._account.login}。这个文件还没纳入管理，'
+                     f'点下面的按钮开始。')
             self.panel.set_push_state('ready', text='纳入 GitHub 管理')
         self.statusbar.set_sync(state)
         self.rail.set_sync_state(state)
@@ -488,16 +511,55 @@ class FreePushWindow(QWidget):
     # ───────────────────────── 尚未接入的动作 ─────────────────────────
 
     def on_push(self) -> None:
+        # 账号还没绑：Push 按钮此时就是「绑定 GitHub 账号」，按下去走授权
+        if self._account is None:
+            self.bind_github_account()
+            return
         if self._editor_stack.currentIndex() == 0:
             return
         QMessageBox.information(
             self, '还没有关联仓库',
-            '这个文件还没有纳入 GitHub 管理，所以现在还不能推送。\n\n'
+            f'当前已绑定 {self._account.login}，但这个文件还没有纳入 GitHub 管理。\n\n'
             '下一步会做的事：\n'
             '  1. 选择要纳入管理的文件（同一文件夹里可以逐个勾选）\n'
             '  2. 关联一个 GitHub 仓库\n'
             '  3. 之后点 Push 就会自动推送\n\n'
-            '这套引导目前还没接入，先把编辑与保存跑通。')
+            '这套引导目前还没接入。')
+
+    # ───────────────────────── GitHub 账号绑定 ─────────────────────────
+
+    def bind_github_account(self) -> None:
+        """打开授权对话框。成功后立刻刷新界面，让用户看得见状态变了。"""
+        dlg = GitHubAuthDialog(self)
+        self._center_dialog(dlg)
+        dlg.start()                       # 先发起申请，用户看到码的时间就更短
+        accepted = dlg.exec() == QDialog.Accepted
+        if not accepted or dlg.account is None:
+            return
+
+        self._account = dlg.account
+        self._refresh_all()
+
+        if not dlg.persisted:
+            # 令牌没存下来就别说「已绑定」——否则下次启动用户会发现白绑了
+            QMessageBox.warning(
+                self, '令牌没能保存到本机',
+                f'{self._account.display} 授权成功了，但令牌写入本机凭据目录失败。\n\n'
+                '这次会话内可以正常使用；下次启动需要重新授权。\n\n'
+                f'凭据目录：{core_config.CONFIG_DIR / "credentials"}')
+        else:
+            QMessageBox.information(
+                self, '已绑定 GitHub 账号',
+                f'{self._account.display} 已连接。\n\n'
+                '接下来打开一个 txt，点右侧的「纳入 GitHub 管理」，'
+                '就能把它关联到仓库并推送。')
+
+    def _center_dialog(self, dlg: QDialog) -> None:
+        """把对话框摆在主窗口中间（无边框窗口不会自动居中）。"""
+        dlg.adjustSize()
+        geo = self.geometry()
+        dlg.move(geo.x() + (geo.width() - dlg.width()) // 2,
+                 geo.y() + (geo.height() - dlg.height()) // 2)
 
     def on_pull(self) -> None:
         QMessageBox.information(self, '尚未接入', 'Pull 会在绑定仓库后开放。')

@@ -146,6 +146,18 @@ _TEMPLATES: dict[str, str] = {
                  '0 2 2h16a2 2 0 0 0 2-2V14l-7-7Z" stroke="{c}" stroke-width="1.6" '
                  'stroke-linejoin="round"/><path d="M23 7v7h7" stroke="{c}" stroke-width="1.6" '
                  'stroke-linejoin="round"/></svg>'),
+
+    # ── 认证对话框 ──
+    'copy': ('<svg viewBox="0 0 14 14" fill="none">'
+             '<rect x="1.4" y="1.4" width="8.2" height="8.2" rx="1.8" stroke="{c}" '
+             'stroke-width="1.1"/>'
+             '<path d="M4.6 12.6h6.4a1.6 1.6 0 0 0 1.6-1.6V4.6" stroke="{c}" stroke-width="1.1" '
+             'stroke-linecap="round" stroke-linejoin="round"/></svg>'),
+    'refresh': ('<svg viewBox="0 0 14 14" fill="none">'
+                '<path d="M12 7a5 5 0 1 1-1.6-3.7" stroke="{c}" stroke-width="1.3" '
+                'stroke-linecap="round"/>'
+                '<path d="M12.2 2.2v3.4h-3.4" stroke="{c}" stroke-width="1.3" '
+                'stroke-linecap="round" stroke-linejoin="round"/></svg>'),
 }
 
 

@@ -27,7 +27,10 @@ sys.path.insert(0, str(ROOT))
 
 from PySide6.QtCore import QTimer  # noqa: E402
 
+from core import ghauth  # noqa: E402
+
 from app.main import build_app  # noqa: E402
+from app.widgets.authdialog import GitHubAuthDialog  # noqa: E402
 from app.window import FreePushWindow  # noqa: E402
 
 SAMPLE = """16：Spring 的 IoC 容器是什么？
@@ -66,12 +69,39 @@ def main() -> int:
     win.show()
 
     produced: list[Path] = []
+    holder: dict = {}
 
     def shoot(name: str) -> None:
         app.processEvents()
         path = out_dir / name
         win.grab().save(str(path))
         produced.append(path)
+
+    def shoot_dialog() -> None:
+        """认证对话框：等待态 + 失败态。
+
+        对话框会真去申请一次设备码（只申请、不授权，无副作用），
+        这样才能验证「验证码真的显示出来」而不是画个假的。
+        """
+        dlg = holder['dlg']
+        app.processEvents()
+        p1 = out_dir / 'ui_06_bind.png'
+        dlg.grab().save(str(p1))
+        produced.append(p1)
+
+        # 失败态不走真网络：直接调用失败分支，验证文案与按钮是否对
+        dlg._countdown.stop()
+        dlg._show_error(ghauth.KIND_NETWORK, '连不上 GitHub',
+                        'URLError: [WinError 10061] connection refused')
+        app.processEvents()
+        p2 = out_dir / 'ui_07_bind_error.png'
+        dlg.grab().save(str(p2))
+        produced.append(p2)
+
+        dlg.reject()
+        for p in produced:
+            print(p)
+        app.quit()
 
     def run() -> None:
         shoot('ui_01_empty.png')                    # 空态
@@ -85,16 +115,20 @@ def main() -> int:
         shoot('ui_03_rail.png')
 
         win.toggle_panel(True)
-        win.toggle_sidebar()                        # 左栏收起（工具栏应出现「显示侧栏」）
+        win.toggle_sidebar()                        # 左栏收起
         shoot('ui_04_no_sidebar.png')
 
         win.toggle_sidebar()                        # 再展开回来
         win.editor.set_font_size(22)                # 等价于 Ctrl+滚轮放大
         shoot('ui_05_zoom.png')
+        win.editor.set_font_size(16)
 
-        for p in produced:
-            print(p)
-        app.quit()
+        dlg = GitHubAuthDialog(win)
+        dlg.setModal(False)
+        dlg.show()
+        dlg.start()
+        holder['dlg'] = dlg
+        QTimer.singleShot(3000, shoot_dialog)
 
     QTimer.singleShot(700, run)
     return app.exec()
