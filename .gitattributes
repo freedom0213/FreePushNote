@@ -1,0 +1,23 @@
+# 换行符统一策略
+#
+# 背景：Windows 的 git 默认 core.autocrlf=true，checkout 时把 LF 换成 CRLF、
+# 提交时再换回去。结果是「本地明明没改，仓库却显示整个文件都改了」（幽灵 diff）。
+# 这个项目本身要处理 .txt 的换行符问题，自己更不能在这上面翻车。
+#
+# 所以：**仓库里一律存 LF**，谁检出到哪台机器都一样。
+
+* text=auto eol=lf
+
+# Windows 批处理必须用 CRLF，否则个别环境下会执行异常
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制资源：不要做任何换行符转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.gif  binary
+*.exe  binary
+*.dll  binary
+*.zip  binary
