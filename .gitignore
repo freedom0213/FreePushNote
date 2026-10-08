@@ -1,0 +1,40 @@
+# ────────────── Python 虚拟环境（675MB，绝不能提交）──────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ────────────── Python 缓存与构建产物 ──────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ────────────── 测试 / 类型检查缓存 ──────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ────────────── 编辑器 / IDE ──────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ────────────── 操作系统 ──────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ────────────── 本地运行残留 ──────────────
+# 说明：本软件的配置（绑定信息 / 最近打开 / 界面状态）一律写在
+# ~/.pushnote/ 下，**不在仓库目录里**，所以这里只需挡住临时文件。
+*.tmp
+*.bak
+~$*
