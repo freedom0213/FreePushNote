@@ -179,6 +179,59 @@ def credential_args(token: str | None) -> list[str]:
     return args + ['-c', f'credential.helper={token_helper()}']
 
 
+def resolved_remote_url(path: str | Path, name: str = 'origin',
+                        env: dict | None = None) -> str:
+    """``git`` **实际会访问**的地址（已应用 ``url.*.insteadOf`` 改写）。
+
+    :func:`remote_url` 读的是配置里的原值；这个读的是生效值。
+    两者的差别恰恰是要命的地方：配置写着 ``https://``，实际走 ``git@``（SSH）
+    —— 那种情况下令牌根本用不上，认证悄悄换成了本机的 SSH 密钥。
+    比直接失败更危险，因为「换了身份」在界面上看不出来。
+    """
+    r = git(path, 'ls-remote', '--get-url', name, check=False, env=env)
+    return stdout_of(r)
+
+
+def push_env(token: str | None = None) -> dict:
+    """推送子进程的环境。
+
+    除 :mod:`envprobe` 那两条净化规则（剔除不可用的 ``*_proxy``、
+    把 git 的 ``http.proxy`` 注入为 ``HTTP_PROXY``）之外，多一条：
+
+    **``GIT_CONFIG_NOSYSTEM=1``** —— 让这个子进程无视系统级 gitconfig。
+    理由很具体：本机 ``D:\\skywaimai\\Git`` 的系统级配置里有
+    ``[url "git@github.com:"] insteadOf = https://github.com/`` 和
+    ``core.sshCommand = ... -p 443 ssh.github.com``，一句 ``git push``
+    会被整段改写成 SSH 直连，令牌形同废纸。实测那种连接在本机是被重置的
+    （``Connection reset by 20.205.243.160 port 443``），于是推送永远失败。
+
+    只影响这一个子进程，**不改动任何配置文件**。
+    """
+    env = envprobe.clean_env()
+    env['GIT_CONFIG_NOSYSTEM'] = '1'
+    if token:
+        env[TOKEN_ENV_VAR] = token
+    return env
+
+
+def looks_like_ssh(url: str) -> bool:
+    """这个远程地址是不是走 SSH。
+
+    只认两种真正会让「令牌失效」的形式：``ssh://...``，
+    以及 scp 形式的 ``user@host:path``（``git@github.com:owner/repo.git``）。
+
+    **本机路径不算** —— 自测拿本地裸仓库当远端，那些地址长成
+    ``C:/.../bare`` 或 ``/tmp/.../bare``，不能因为「不是 https」就被拦下。
+    """
+    if url.startswith('ssh://'):
+        return True
+    _scheme, sep, _rest = url.partition('://')
+    if sep:                       # 有明确 scheme：不是 ssh 就交给它自己的协议
+        return False
+    head = url.split(':', 1)[0]
+    return ':' in url and '@' in head
+
+
 def identity_for_account(login: str, uid: int | None = None) -> tuple[str, str]:
     """GitHub 账号 → git 提交身份。
 
@@ -301,12 +354,21 @@ def push(path: str | Path, *, token: str | None = None,
         log('!! 尚未配置远程仓库 origin，已跳过推送。')
         return False, 0
 
+    env = push_env(token)
+
+    # 令牌只能通过 https 用。若本机 git 把地址改写成 SSH，认证会**悄悄换成**
+    # 本机的 SSH 密钥 —— 推上去的东西署着另一个身份，界面上还显示成功。
+    # 与其让它发生，不如在这儿停下来说清原因。
+    target = resolved_remote_url(path, env=env)
+    if looks_like_ssh(target):
+        log(f'！！推送地址是 SSH 形式，已中止：{target}')
+        log('   本机 git 的 url.*.insteadOf 规则把 GitHub 地址改写成了 SSH，')
+        log('   这样令牌用不上，认证会改走本机 SSH 密钥。')
+        log('   排查：git config --show-origin --get-regexp "url\\..*insteadof"')
+        return False, 0
+
     cmd = ['git', *credential_args(token), 'push']
     cmd += (['-u'] if set_upstream else []) + ['origin', 'HEAD']
-
-    env = envprobe.clean_env()
-    if token:
-        env[TOKEN_ENV_VAR] = token
 
     last_detail = ''
     for attempt in range(1, retries + 1):

@@ -16,6 +16,7 @@ config / convert / site / pipeline 的完整覆盖在 pipeline_selftest.py 里 �
 """
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -186,10 +187,87 @@ def test_gitops() -> None:
           name == 'someone' and email == '7+someone@users.noreply.github.com')
 
 
+def test_ssh_rewrite_defense() -> None:
+    """系统级 gitconfig 把 GitHub 地址改写成 SSH 时，推送必须仍走 https。
+
+    这不是假想：本机 ``D:\\skywaimai\\Git\\etc\\gitconfig`` 里真有
+    ``[url "git@github.com:"] insteadOf = https://github.com/``，
+    于是「双击同步笔记」那个脚本的 ``git push`` 全被改成 SSH 直连，
+    而那条连接在本机是被重置的 —— 连试 3 次全失败，且报错完全不提配置。
+    """
+    print('== gitops：url.insteadOf 改写防护 ==')
+
+    check('识别 ssh:// 形式', gitops.looks_like_ssh('ssh://git@github.com/a/b.git'))
+    check('识别 scp 形式', gitops.looks_like_ssh('git@github.com:owner/repo.git'))
+    check('https 不算 SSH', not gitops.looks_like_ssh('https://github.com/a/b.git'))
+    check('本机路径不算 SSH（自测拿裸仓库当远端，别误拦）',
+          not gitops.looks_like_ssh('C:/tmp/x/bare')
+          and not gitops.looks_like_ssh('/tmp/x/bare'))
+
+    env = gitops.push_env('SECRET')
+    check('推送子进程无视系统级 gitconfig',
+          env.get('GIT_CONFIG_NOSYSTEM') == '1')
+    # 继承来的小写 *_proxy 必须清掉（它们可能指向不支持 CONNECT 的代理，
+    # 会让 git 静默挂死、零输出）；git 自己配置里的 http.proxy 再以大写注入。
+    # 注意别用 k.lower() 去比 —— 那会把注入的大写 HTTP_PROXY 也一起算进去。
+    check('清掉了继承来的小写 *_proxy',
+          'http_proxy' not in env and 'https_proxy' not in env)
+    check('git 的 http.proxy 仍以大写形式注入给子进程',
+          env.get('HTTP_PROXY') == env.get('HTTPS_PROXY')
+          == (envprobe.git_http_proxy() or None))
+    check('令牌随环境传入', env.get(gitops.TOKEN_ENV_VAR) == 'SECRET')
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        td = Path(td)
+        repo = td / 'repo'
+        gitops.init_repo(repo, branch='main')
+        gitops.ensure_remote(repo, 'example/demo')
+
+        # 用 GIT_CONFIG_SYSTEM 指向一份「带改写规则的假系统配置」，
+        # 这样能在不碰本机任何真实配置的前提下复现同一个坑。
+        sabotage = td / 'sabotage.gitconfig'
+        sabotage.write_text('[url "git@github.com:"]\n'
+                            '\tinsteadOf = https://github.com/\n',
+                            encoding='utf-8', newline='\n')
+
+        old = os.environ.get('GIT_CONFIG_SYSTEM')
+        os.environ['GIT_CONFIG_SYSTEM'] = str(sabotage)
+        try:
+            polluted = gitops.resolved_remote_url(repo, env=envprobe.clean_env())
+            check('被污染时地址确实变成 SSH（说明这个用例是有效的）',
+                  polluted == 'git@github.com:example/demo.git', polluted)
+            safe = gitops.resolved_remote_url(repo, env=gitops.push_env())
+            check('换成 push_env 后地址回到 https',
+                  safe == 'https://github.com/example/demo.git', safe)
+
+            # 万一将来有人把改写规则写进**用户级**配置（NOSYSTEM 管不到那儿），
+            # push 必须当场拒绝，而不是悄悄改用本机 SSH 密钥认证 ——
+            # 那会「成功推送但署了另一个身份」，比失败更难发现。
+            real = gitops.resolved_remote_url
+            gitops.resolved_remote_url = (
+                lambda *a, **k: 'git@github.com:example/demo.git')
+            try:
+                logs: list[str] = []
+                ok, tries = gitops.push(repo, token='SECRET', on_log=logs.append)
+                check('地址是 SSH 形式时 push 直接拒绝',
+                      ok is False and tries == 0, f'{ok} {tries}')
+                check('并说明了原因（提到 insteadOf）',
+                      any('insteadOf' in line for line in logs),
+                      ' | '.join(logs))
+            finally:
+                gitops.resolved_remote_url = real
+        finally:
+            if old is None:
+                os.environ.pop('GIT_CONFIG_SYSTEM', None)
+            else:
+                os.environ['GIT_CONFIG_SYSTEM'] = old
+
+
 def main() -> int:
     test_config()
     test_envprobe()
     test_gitops()
+    test_ssh_rewrite_defense()
     print()
     print(f'通过 {_passed} 项，失败 {_failed} 项')
     return 1 if _failed else 0
