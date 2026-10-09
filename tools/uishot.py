@@ -174,6 +174,52 @@ def main() -> int:
             print(p)
         app.quit()
 
+    def shoot_recent_and_busy() -> None:
+        """左栏「最近打开」的悬停删除按钮，以及推送中的忙碌指示。
+
+        悬停状态是手工设进列表里的（``_set_hover``）—— 离屏环境没有真实鼠标，
+        但 delegate 读的就是这个字段，所以画出来的和用户真正划过时是同一套代码。
+        """
+        demo = out_dir / 'recent_demo'
+        demo.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for n in ('Java八股2.txt', 'agent开发八股.txt', '读书笔记.txt',
+                  'Redis补充.txt'):
+            f = demo / n
+            f.write_text(f'{n} 的内容\n', encoding='utf-8', newline='\n')
+            paths.append(str(f))
+
+        win.load_path(paths[0])
+        win._recent = list(paths)
+        win.sidebar.set_recent(win._recent)
+        win.sidebar.highlight_recent(paths[0])
+        app.processEvents()
+
+        lst = win.sidebar.recent_list
+        # 鼠标停在第二行上：该行露出 ×，当前编辑的那一行本来就有 ×
+        lst._set_hover(paths[1], False)
+        app.processEvents()
+        p = out_dir / 'ui_11_recent_delete.png'
+        lst.grab().save(str(p))
+        produced.append(p)
+
+        # 鼠标正压在 × 上：加深成实心反馈
+        lst._set_hover(paths[1], True)
+        app.processEvents()
+        p = out_dir / 'ui_12_recent_close_hover.png'
+        lst.grab().save(str(p))
+        produced.append(p)
+
+        # 推送中：按钮暗蓝 + 细进度条 + 「正在提交到 GitHub…」
+        win.panel.set_push_state('running')
+        win.panel.set_sync_state('running')
+        win.panel.set_progress('pushing')
+        app.processEvents()
+        p = out_dir / 'ui_13_busy.png'
+        win.panel._progress.parentWidget().grab().save(str(p))
+        produced.append(p)
+        win.panel.set_progress(None)
+
     def run() -> None:
         shoot('ui_01_empty.png')                    # 空态
 
@@ -193,6 +239,8 @@ def main() -> int:
         win.editor.set_font_size(22)                # 等价于 Ctrl+滚轮放大
         shoot('ui_05_zoom.png')
         win.editor.set_font_size(16)
+
+        shoot_recent_and_busy()
 
         dlg = GitHubAuthDialog(win)
         dlg.setModal(False)

@@ -29,14 +29,17 @@ _TMP = Path(tempfile.mkdtemp(prefix='pushnote_appflow_'))
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 os.environ['PUSHNOTE_HOME'] = str(_TMP / 'home')
 
+from PySide6.QtCore import QEvent, QPointF, Qt  # noqa: E402
+from PySide6.QtGui import QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
-from core import config, ghauth, gitops, pipeline  # noqa: E402
+from core import config, envprobe, ghauth, gitops, pipeline  # noqa: E402
 
 from app import account as account_mod  # noqa: E402
 from app.main import build_app  # noqa: E402
 from app.widgets.managedialog import ManageFolderDialog  # noqa: E402
 from app.widgets.pushdialog import PushDialog  # noqa: E402
+from app.widgets.sidebar import _close_rect  # noqa: E402
 from app.window import FreePushWindow  # noqa: E402
 
 # 模态框一律不弹：脚本要能无人值守跑完
@@ -101,6 +104,150 @@ def bare_tree(bare: Path) -> list[str]:
     r = gitops.git(bare, '-c', 'core.quotepath=false', 'ls-tree', '-r',
                    '--name-only', 'HEAD', check=False)
     return [l for l in gitops.stdout_of(r).splitlines() if l.strip()]
+
+
+def _test_recent_list(win, folder: Path, app) -> None:
+    """「最近打开」的顺序规则，以及每行右侧的删除按钮。"""
+    print('\n[10] 「最近打开」：点开不重排 / 保存才置顶 / 可逐条删除')
+    f1, f2 = folder / '第一篇.txt', folder / '第二篇.txt'
+    f3 = folder / '第三篇.txt'
+    f3.write_text('第三篇\n', encoding='utf-8', newline='\r\n')
+
+    win._recent = [str(f1), str(f2)]
+    win._save_recent()
+    win.sidebar.set_recent(win._recent)
+
+    win.load_path(str(f2))
+    check('点开已在列表里的文件不改变顺序',
+          win._recent == [str(f1), str(f2)], str(win._recent))
+
+    win.load_path(str(f3))
+    check('从未打开过的文件追加到末尾，不抢占第一位',
+          win._recent == [str(f1), str(f2), str(f3)], str(win._recent))
+
+    win.editor.setPlainText('改了点东西')
+    win.save_file()
+    check('保存之后才把它提到第一位',
+          win._recent == [str(f3), str(f1), str(f2)], str(win._recent))
+
+    win.sidebar.set_recent(win._recent)
+    win.resize(1200, 760)
+    lst = win.sidebar.recent_list
+    lst.resize(180, 320)
+    app.processEvents()
+
+    item = lst.item(1)
+    check('列表里还有这一条可供点删', item is not None)
+    if item is None:
+        return
+    row = lst.visualItemRect(item)
+    check('行矩形已布局（否则下面的几何断言无意义）', row.height() > 0, str(row))
+    if row.height() <= 0:
+        return
+
+    close = _close_rect(row)
+    check('删除按钮落在行内且靠右',
+          row.contains(close.center()) and close.right() <= row.right(),
+          f'row={row} close={close}')
+
+    victim = item.data(Qt.UserRole + 1)
+    before = list(win._recent)
+    ev = QMouseEvent(QEvent.MouseButtonPress, QPointF(close.center()),
+                     Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    lst.mousePressEvent(ev)
+    check('点 × 把这一条移出列表',
+          victim not in win._recent and len(win._recent) == len(before) - 1,
+          str(win._recent))
+    check('点 × 不会顺手把这一行切成当前文件',
+          win._current == f3, str(win._current))
+    check('正在编辑的文档没有被连累关闭',
+          win._editor_stack.currentIndex() == 1)
+
+
+def _test_refresh_caches(win, folder: Path) -> None:
+    """切文件不应该反复起 git 子进程（右栏「最近推送」必须命中缓存）。
+
+    这是「点侧栏没反应、过一会儿才切过去」的直接原因：右栏每次重画都要
+    读一次提交历史 = 起一个 git 进程。
+    """
+    print('\n[11] 切文件不再反复起 git 进程')
+    calls: list[str] = []
+    real = gitops.recent_commits
+
+    def counted(ws, n=5):
+        calls.append(str(ws))
+        return real(ws, n)
+
+    gitops.recent_commits = counted
+    try:
+        win._hist_cache.clear()
+        win.load_path(str(folder / '第一篇.txt'))
+        first = len(calls)
+        check('首次读历史确实起了一次 git（说明计数器有效）', first >= 1, str(first))
+        for _ in range(5):
+            win.load_path(str(folder / '第二篇.txt'))
+            win.load_path(str(folder / '第一篇.txt'))
+        check('再切 10 次一次都没多起（全部命中缓存）',
+              len(calls) == first, f'{first} → {len(calls)}')
+
+        # 缓存必须能失效：新提交之后要看到新的历史
+        gitops.recent_commits = real
+        ws = config.workspace_dir(config.groups(win._cfg)[0])
+        (ws / 'x.txt').write_text('x\n', encoding='utf-8', newline='\n')
+        gitops.add_all(ws)
+        gitops.commit(ws, 'chore: 制造一次新提交')
+        before = len(win._group_history(config.groups(win._cfg)[0]))
+        after = len(win._group_history(config.groups(win._cfg)[0]))
+        check('HEAD 变了以后缓存会失效并重读', before == after and before >= 2,
+              f'{before} → {after}')
+    finally:
+        gitops.recent_commits = real
+
+
+def _test_editor_stats(win) -> None:
+    """状态栏统计：换成 O(1) 算法后，口径必须和原来逐字一致。"""
+    print('\n[12] 状态栏统计（行数 / 字符数）')
+    for text, want in [('', (1, 0)), ('a', (1, 1)), ('abc\ndef', (2, 6)),
+                       ('abc\ndef\n', (3, 6)), ('中文\n多行\n测试', (3, 6)),
+                       ('\n\n\n', (4, 0))]:
+        win.editor.load_text(text)
+        got = win.editor.stats()
+        check(f'{text!r:16s} → {want}', got == want, str(got))
+    win.editor.load_text('x' * 4000)
+    check('单行超长仍算一行', win.editor.stats() == (1, 4000), str(win.editor.stats()))
+
+
+def _test_busy_indicator(win, app) -> None:
+    """忙碌指示（进度条 + 文案），以及「不弹控制台窗口」的环境参数。"""
+    print('\n[13] 忙碌指示与控制台闪窗')
+    win.panel.set_progress('preparing')
+    check('准备阶段进度条出现', not win.panel._progress.isHidden())
+    check('准备阶段文案点明是本地整理',
+          win.panel._busy_label.text() == '正在整理这次要提交的内容…',
+          win.panel._busy_label.text())
+    check('忙碌时收起快捷键提示', win.panel._hotkey.isHidden())
+
+    win.panel.set_progress('pushing')
+    check('提交阶段文案换成「正在提交到 GitHub…」',
+          win.panel._busy_label.text() == '正在提交到 GitHub…',
+          win.panel._busy_label.text())
+
+    win.panel.set_progress(None)
+    check('结束后进度条收起', win.panel._progress.isHidden())
+    check('结束后忙碌文案收起', win.panel._busy_label.isHidden())
+
+    win.panel.set_push_state('ready')
+    check('结束后快捷键提示回来', not win.panel._hotkey.isHidden())
+    win.panel.set_push_state('uptodate')
+    win.panel.set_progress(None)
+    check('「已是最新」态下不显示快捷键提示', win.panel._hotkey.isHidden())
+
+    kw = envprobe.no_window_kwargs()
+    if os.name == 'nt':
+        check('Windows 下 git 子进程带 CREATE_NO_WINDOW（不再闪黑框）',
+              kw.get('creationflags') == 0x08000000, str(kw))
+    else:
+        check('非 Windows 不加 creationflags', kw == {}, str(kw))
 
 
 def main() -> int:  # noqa: C901
@@ -357,6 +504,11 @@ def main() -> int:  # noqa: C901
               win.panel._status_desc.text())
     finally:
         gitops.ensure_remote = real_ensure
+
+    _test_recent_list(win, folder, app)
+    _test_refresh_caches(win, folder)
+    _test_editor_stats(win)
+    _test_busy_indicator(win, app)
 
     print('\n' + '=' * 66)
     print(f'通过 {PASS} / {PASS + FAIL}')

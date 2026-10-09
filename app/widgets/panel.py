@@ -15,7 +15,8 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
                                QToolButton, QVBoxLayout, QWidget)
 
@@ -30,6 +31,65 @@ SYNC_STATES = {
     'unmanaged': (theme.TEXT_WEAK, '未纳入管理', 'UNMANAGED', '这个文件没有关联到任何 GitHub 仓库'),
     'unlinked':  (theme.TEXT_WEAK, '未绑定账号', 'UNLINKED', '绑定 GitHub 账号后，才能把笔记推送到仓库'),
 }
+
+#: 忙碌状态 → 按钮下方那行小字
+_BUSY_TEXT = {
+    'preparing': '正在整理这次要提交的内容…',
+    'pushing': '正在提交到 GitHub…',
+}
+
+
+class _SweepBar(QWidget):
+    """一条来回扫动的细进度条（3px），用于「正在忙、但进度不可知」的场合。
+
+    为什么不直接用 ``QProgressBar``：它的不定长动画由 style 实现，
+    一旦套上 QSS 就可能退化成一条静止的色块（不同平台表现还不一样）。
+    这点动画自己画最稳，也就二十来行。
+
+    只在忙碌期间启动计时器 —— 平时不占 CPU。
+    """
+
+    _INTERVAL = 16          # ≈60fps
+    _SPEED = 0.022          # 每帧前进的比例
+    _WIDTH_RATIO = 0.3      # 高亮块占整条宽度的比例
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(3)
+        self._pos = 0.0
+        self._step = self._SPEED
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._INTERVAL)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self) -> None:
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def _tick(self) -> None:
+        self._pos += self._step
+        if self._pos >= 1.0:
+            self._pos, self._step = 1.0, -self._SPEED
+        elif self._pos <= 0.0:
+            self._pos, self._step = 0.0, self._SPEED
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(theme.BG_CARD))
+        p.drawRoundedRect(self.rect(), 1.5, 1.5)
+
+        w = self.width() * self._WIDTH_RATIO
+        x = (self.width() - w) * self._pos
+        p.setBrush(QColor(theme.PRIMARY_HOVER))
+        p.drawRoundedRect(QRectF(x, 0.0, w, float(self.height())), 1.5, 1.5)
+        p.end()
+
 
 
 class _Card(QFrame):
@@ -222,6 +282,10 @@ class PushPanel(QFrame):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
+        # 记住当前的按钮状态：忙碌指示结束时要把快捷键提示还原成「该不该显示」，
+        # 而不是一律显示 —— 「已是最新」态下它本来就不该出现。
+        self._push_state = 'disabled'
+
         self.push_button = QPushButton('打开一个文件后可推送')
         self.push_button.setObjectName('PushButton')
         self.push_button.setFixedHeight(42)
@@ -230,10 +294,39 @@ class PushPanel(QFrame):
         self.push_button.clicked.connect(self.push_requested)
         lay.addWidget(self.push_button)
 
+        # 忙碌时出现的细进度条 + 一行小字。放在按钮正下方：
+        # 用户的视线本来就在按钮上，不需要再去别处找「它到底动了没」。
+        self._progress = _SweepBar()
+        self._progress.setVisible(False)
+        lay.addWidget(self._progress)
+
+        self._busy_label = _label('', theme.WARNING, theme.FS_TINY)
+        self._busy_label.setVisible(False)
+        self._busy_label.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._busy_label)
+
         self._hotkey = _label('Ctrl + Enter', theme.TEXT_FAINT, 10, mono=True)
         self._hotkey.setAlignment(Qt.AlignCenter)
         lay.addWidget(self._hotkey)
         return wrap
+
+    def set_progress(self, state: str | None) -> None:
+        """``state``: ``None`` | ``'preparing'`` | ``'pushing'``。
+
+        「准备」和「推送」分开，是因为它们对用户的含义不同：前者是本地整理
+        （失败也不会丢东西），后者是要联网。文案得说清是哪一个。
+        """
+        busy = state in _BUSY_TEXT
+        self._progress.setVisible(busy)
+        self._busy_label.setVisible(busy)
+        if busy:
+            self._busy_label.setText(_BUSY_TEXT[state])
+            self._progress.start()
+            self._hotkey.setVisible(False)   # 忙的时候别同时塞快捷键提示
+        else:
+            self._progress.stop()
+            # 还原成「这个按钮状态下该不该显示」，而不是一律显示
+            self._hotkey.setVisible(self._push_state in ('ready', 'failed'))
 
     # ───────────────────────── 次要动作 ─────────────────────────
 
@@ -374,6 +467,7 @@ class PushPanel(QFrame):
             'uptodate': '已是最新，无需推送',
         }
         self.push_button.setText(text or labels.get(state, 'Push 到 GitHub'))
+        self._push_state = state
         self.push_button.setProperty('state', state)
         self.push_button.style().unpolish(self.push_button)
         self.push_button.style().polish(self.push_button)

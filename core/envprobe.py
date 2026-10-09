@@ -19,6 +19,26 @@ import subprocess
 
 _PROXY_KEYS = frozenset(('http_proxy', 'https_proxy', 'all_proxy', 'ftp_proxy', 'no_proxy'))
 
+#: Windows 上 CREATE_NO_WINDOW 的取值。直接写常量是为了不依赖平台常量是否存在。
+_CREATE_NO_WINDOW = 0x08000000
+
+
+def no_window_kwargs() -> dict:
+    """让子进程**不弹控制台窗口**（Windows 专用，其它平台返回空字典）。
+
+    不加这个，每一次 ``git`` 调用都会在屏幕上闪一个黑色控制台窗口。
+    用户看到的是「一操作就冒出一堆 cmd 窗口」—— 既打断视线，
+    也把「其实是在调 git」这个实现细节摆到了台面上。
+
+    ``CREATE_NO_WINDOW`` 只影响窗口创建，**不影响** stdout/stderr 的捕获，
+    所以错误信息照样拿得到。
+
+    返回的字典直接展开进 ``subprocess.run(...)`` 即可。
+    """
+    if os.name == 'nt':
+        return {'creationflags': _CREATE_NO_WINDOW}
+    return {}
+
 
 def git_http_proxy(cwd: str | os.PathLike | None = None) -> str:
     """读取本机 git 配置中的 ``http.proxy``；未配置或执行失败时返回空串。"""
@@ -27,6 +47,7 @@ def git_http_proxy(cwd: str | os.PathLike | None = None) -> str:
             ['git', 'config', '--get', 'http.proxy'],
             cwd=cwd, capture_output=True, text=True,
             encoding='utf-8', errors='replace', timeout=10,
+            **no_window_kwargs(),
         )
     except (OSError, subprocess.SubprocessError):
         return ''

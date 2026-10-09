@@ -42,6 +42,9 @@ def _run(args: list[str], cwd: str | Path, *, env: dict | None = None,
         list(args), cwd=str(cwd), capture_output=True,
         env=env if env is not None else envprobe.clean_env(),
         timeout=timeout,
+        # 不让它弹控制台窗口：否则每调一次 git 就闪一个黑框，
+        # 用户看到的就是「一点击冒出一堆 cmd」，既打断视线又暴露了实现
+        **envprobe.no_window_kwargs(),
     )
 
 

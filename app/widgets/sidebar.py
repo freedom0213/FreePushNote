@@ -5,6 +5,8 @@
 
 1. **最近打开** —— 不受 GitHub 管理的 txt。关掉软件后这个列表仍然保留
    （持久化在 ``~/.pushnote/recent.json``），下次打开还在。
+   排序规则是用户定的：**点开看看不会改变顺序，只有保存过才提到第一位** ——
+   否则「随手翻了几篇」就把顺序搅乱了。每行右侧悬停会露出一个 ×，可把该条移除。
 2. **受管理的文件夹** —— 已纳入 GitHub 管理的分组，每组 = 一个仓库；
    组内的文件就是当初勾选要纳管的那些。
 
@@ -14,14 +16,145 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QToolButton, QTreeWidget,
+                               QListWidgetItem, QStyle, QStyledItemDelegate,
+                               QStyleOptionViewItem, QToolButton, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import icons, theme
 
 _ROLE_PATH = Qt.UserRole + 1
+
+#: 行尾为删除按钮预留的宽度 / 按钮本身的大小
+_CLOSE_ZONE = 30
+_CLOSE_SIZE = 20
+
+
+def _close_rect(item_rect: QRect) -> QRect:
+    """某一行里删除按钮的位置。
+
+    绘制和点击判定**必须用同一个函数**算 —— 分成两处写，迟早会错开几个像素，
+    表现成「看着点到了却没反应」，那种 bug 很难查。
+    """
+    left = item_rect.right() - _CLOSE_ZONE + (_CLOSE_ZONE - _CLOSE_SIZE) // 2
+    top = item_rect.top() + (item_rect.height() - _CLOSE_SIZE) // 2
+    return QRect(left, top, _CLOSE_SIZE, _CLOSE_SIZE)
+
+
+class _RecentDelegate(QStyledItemDelegate):
+    """给「最近打开」的每一行右侧画一个删除按钮（×）。
+
+    为什么用 delegate 画、而不是每行塞一个 QToolButton 子控件：
+    子控件要自己跟着滚动条、窗口缩放手搬位置，漏一处就会错位；
+    delegate 是在视口坐标里画的，这些都由列表框架处理掉了。
+    """
+
+    def __init__(self, view: 'QListWidget') -> None:
+        super().__init__(view)
+        self._view = view
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem,
+              index) -> None:  # noqa: D102
+        super().paint(painter, option, index)
+
+        path = index.data(_ROLE_PATH)
+        selected = bool(option.state & QStyle.State_Selected)
+        hovered = getattr(self._view, 'hover_path', None) == path
+        if not (hovered or selected):
+            return
+
+        rect = _close_rect(option.rect)
+        on_button = hovered and getattr(self._view, 'hover_close', False)
+
+        painter.save()
+        if on_button:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(theme.BG_ACTIVE))
+            painter.drawRoundedRect(rect, theme.RADIUS_BTN, theme.RADIUS_BTN)
+        else:
+            # 用行背景盖掉这块，免得长文件名被压在 × 底下
+            painter.fillRect(
+                rect,
+                QColor(theme.BG_SELECTED if selected else
+                       theme.BG_HOVER if hovered else theme.BG_PANEL))
+
+        pen = QPen(QColor(theme.TEXT_STRONG if on_button else theme.TEXT_SECOND))
+        pen.setWidthF(1.2)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        c = rect.center()
+        d = 3.4
+        painter.drawLine(QPointF(c.x() - d, c.y() - d), QPointF(c.x() + d, c.y() + d))
+        painter.drawLine(QPointF(c.x() + d, c.y() - d), QPointF(c.x() - d, c.y() + d))
+        painter.restore()
+
+
+class _RecentList(QListWidget):
+    """「最近打开」列表。
+
+    比普通 QListWidget 多三件事：
+
+    1. 鼠标划过某一行时，行尾显示删除按钮（×）；
+    2. 点那个 × 是**从列表移除**，点别处才是**打开文件** ——
+       所以在 ``mousePressEvent`` 里就要判断并吃掉这一次点击，
+       否则列表还会再发一次 ``itemClicked``，变成「既删掉又打开」；
+    3. 悬停状态自己维护（``hover_path`` / ``hover_close``），供 delegate 读取。
+    """
+
+    open_requested = Signal(str)      # 留作显式入口；当前由 itemClicked 触发
+    remove_requested = Signal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.hover_path: str | None = None
+        self.hover_close = False
+        self.setItemDelegate(_RecentDelegate(self))
+        # 不按下也要收到 mouseMove，否则「划过就出现 ×」不会发生
+        self.viewport().setMouseTracking(True)
+
+    # ── 悬停追踪 ──
+
+    def _item_at(self, pos) -> QListWidgetItem | None:
+        item = self.itemAt(pos)
+        return item if (item is not None and item.data(_ROLE_PATH)) else None
+
+    def _set_hover(self, path: str | None, on_button: bool = False) -> None:
+        if path == self.hover_path and on_button == self.hover_close:
+            return
+        self.hover_path, self.hover_close = path, on_button
+        self.viewport().update()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        pos = event.position().toPoint()
+        item = self._item_at(pos)
+        self._set_hover(item.data(_ROLE_PATH) if item else None,
+                        bool(item) and _close_rect(self.visualItemRect(item)).contains(pos))
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._set_hover(None)
+        super().leaveEvent(event)
+
+    # ── 点击 ──
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        pos = event.position().toPoint()
+        if event.button() == Qt.LeftButton:
+            item = self._item_at(pos)
+            if item is not None and _close_rect(self.visualItemRect(item)).contains(pos):
+                self.remove_requested.emit(item.data(_ROLE_PATH))
+                event.accept()
+                return                 # 吃掉这一下，别再触发 itemClicked
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        # 点 × 的那一下不该把这一行顺手切成「当前文件」
+        if event.button() == Qt.LeftButton and self.hover_close:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class _GroupHeader(QFrame):
@@ -63,6 +196,7 @@ class Sidebar(QFrame):
 
     file_activated = Signal(str)            # 最近打开列表里的某个 txt
     managed_file_activated = Signal(str)    # 受管理文件夹里的某个 txt
+    recent_removed = Signal(str)            # 把某条从「最近打开」里移除
     new_note_requested = Signal()
     collapse_requested = Signal()
     context_requested = Signal(str, object)  # (路径, 全局坐标 QPoint)
@@ -82,7 +216,7 @@ class Sidebar(QFrame):
             self.collapse_requested)
         root.addWidget(self._recent_header)
 
-        self.recent_list = QListWidget()
+        self.recent_list = _RecentList()
         self.recent_list.setObjectName('NoteTree')
         self.recent_list.setFrameShape(QFrame.NoFrame)
         self.recent_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -90,6 +224,7 @@ class Sidebar(QFrame):
         self.recent_list.setContentsMargins(8, 0, 8, 0)
         self.recent_list.itemActivated.connect(self._on_recent_activated)
         self.recent_list.itemClicked.connect(self._on_recent_activated)
+        self.recent_list.remove_requested.connect(self.recent_removed)
         self.recent_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.recent_list.customContextMenuRequested.connect(self._on_recent_context)
         root.addWidget(self.recent_list)
@@ -124,7 +259,7 @@ class Sidebar(QFrame):
         self.managed_tree.customContextMenuRequested.connect(self._on_managed_context)
         root.addWidget(self.managed_tree, 1)
 
-        self._managed_empty = QLabel('还没有纳入 GitHub 管理的文件夹。')
+        self._managed_empty = QLabel('还没有纳入 GitHub\n管理的文件夹。')
         self._managed_empty.setWordWrap(True)
         self._managed_empty.setStyleSheet(
             f'color: {theme.TEXT_FAINT}; font-size: {theme.FS_TINY}px;')
@@ -155,11 +290,12 @@ class Sidebar(QFrame):
 
     def set_recent(self, paths: list[str]) -> None:
         self.recent_list.clear()
+        self.recent_list._set_hover(None)      # 行都被重建了，悬停状态一并复位
         for p in paths:
             item = QListWidgetItem(icons.icon('file', theme.TEXT_MUTED, 13),
                                    Path(p).name)
             item.setData(_ROLE_PATH, p)
-            item.setToolTip(p)
+            item.setToolTip(f'{p}\n\n右侧的 × 可以把这一条从列表里移除')
             item.setSizeHint(QSize(0, 28))
             self.recent_list.addItem(item)
         self._refresh_empty()

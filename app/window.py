@@ -17,8 +17,8 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
-from PySide6.QtGui import QCursor, QGuiApplication, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame,
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame,
                                QHBoxLayout, QInputDialog, QLabel, QMessageBox,
                                QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
@@ -50,7 +50,7 @@ from .widgets.authdialog import GitHubAuthDialog
 from .widgets.editor import CodeEditor
 from .widgets.managedialog import ManageFolderDialog
 from .widgets.pushdialog import PushDialog
-from .workers import PushWorker, start_push_worker
+from .workers import PushWorker, StageWorker, start_worker
 from .widgets.panel import PanelRail, PushPanel
 from .widgets.sidebar import Sidebar, SidebarRail
 from .widgets.statusbar import StatusBar
@@ -76,6 +76,45 @@ def _relative_time(ts: int) -> str:
     if delta < 86400 * 30:
         return f'{delta // 86400} 天前'
     return datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
+
+
+def _file_stamp(p: Path) -> tuple[int, int] | None:
+    """文件的 (mtime, size)。拿不到返回 None。"""
+    try:
+        st = p.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _refs_stamp(ws: Path) -> tuple | None:
+    """工作区的「git 历史有没有变」指纹。
+
+    只读文件属性、**不起进程** —— 这正是它存在的理由：判断历史变没变
+    不该再花一次 subprocess。每次 commit / push 都会重写
+    ``refs/heads/<branch>``，所以它的 mtime 是最省事的失效信号。
+
+    仓库还没建、或者引用被打包进 ``packed-refs`` 而 refs/heads 为空时返回
+    None，表示「拿不到可靠指纹」—— 这时**不缓存**，宁可多读一次，
+    也不能把过期的「最近推送」摆在界面上。
+    """
+    git_dir = ws / '.git'
+    if not git_dir.is_dir():
+        return None
+    heads = git_dir / 'refs' / 'heads'
+    ref_files = sorted(p for p in heads.glob('*') if p.is_file()) if heads.is_dir() else []
+    if not ref_files:
+        return None
+    parts = []
+    for p in ref_files:
+        stamp = _file_stamp(p)
+        if stamp:
+            parts.append((p.name, stamp))
+    for rel in ('HEAD', 'packed-refs'):
+        stamp = _file_stamp(git_dir / rel)
+        if stamp:
+            parts.append((rel, stamp))
+    return tuple(parts) or None
 
 
 class _EmptyState(QWidget):
@@ -145,6 +184,17 @@ class FreePushWindow(QWidget):
         # 推送过程的输出。界面上不展示（用户不关心 git 命令），
         # 但失败时放进「详细信息」里，排查问题全靠它。
         self._push_log_lines: list[str] = []
+        # 这次推送对应的分组（整理在后台线程里跑，确认层要用回同一个分组）
+        self._push_group: dict | None = None
+
+        # ── 缓存 ──
+        # 切文件、点鼠标、改一个字都会走到刷新；不缓存就等于每操作一下
+        # 都去读盘或起一个 git 进程 —— 表现就是「点了没反应，然后卡一下才动」。
+        # 每个缓存的失效键都写在对应读取处。
+        self._cfg_stamp: tuple | None = None          # config.json 的 (mtime, size)
+        self._groups_sig: str | None = None           # 左栏「受管理的文件夹」内容指纹
+        self._hist_cache: dict[str, tuple] = {}       # 工作区 → (refs 指纹, 提交列表)
+        self._pushed_cache: dict[str, tuple] = {}     # (分组, 文件名) → (文件指纹, 结论)
 
         self._build_ui()
         self._build_shortcuts()
@@ -199,6 +249,7 @@ class FreePushWindow(QWidget):
         self.sidebar.new_note_requested.connect(self.new_file)
         self.sidebar.collapse_requested.connect(self.toggle_sidebar)
         self.sidebar.context_requested.connect(self._show_file_menu)
+        self.sidebar.recent_removed.connect(self._remove_recent)
         center_lay.addWidget(self.sidebar)
 
         # 左栏收起后的窄条：一个按钮就地展开，不用跑去工具栏找
@@ -273,7 +324,7 @@ class FreePushWindow(QWidget):
         p = Path(path)
         if not p.is_file():
             QMessageBox.warning(self, '文件不存在', f'找不到这个文件：\n{p}')
-            self._drop_recent(str(p))
+            self._remove_recent(str(p))
             return
         try:
             text, enc, eol = fileio.read_text(p)
@@ -287,7 +338,7 @@ class FreePushWindow(QWidget):
         self.editor.load_text(text)
         self._editor_stack.setCurrentIndex(1)
         self._dirty = False
-        self._push_recent(str(p))
+        self._touch_recent(str(p))
         self.editor.setFocus()
         self._refresh_all()
 
@@ -309,6 +360,10 @@ class FreePushWindow(QWidget):
             QMessageBox.warning(self, '保存失败', f'{self._current}\n\n{exc}')
             return False
         self._dirty = False
+        # 存过了 → 它才算真正「最近用过」，这时才值得排到第一位。
+        # 自动保存也走这里：用户敲了字本身就是「在这篇上干活」的证据，
+        # 不区分是 Ctrl+S 还是防抖落盘。
+        self._promote_recent(str(self._current))
         self._refresh_title()
         return True
 
@@ -320,7 +375,7 @@ class FreePushWindow(QWidget):
             return False
         self._current = Path(path)
         if self.save_file():
-            self._push_recent(path)
+            self._promote_recent(path)
             self._refresh_all()
             return True
         return False
@@ -358,7 +413,24 @@ class FreePushWindow(QWidget):
         except OSError:
             pass
 
-    def _push_recent(self, path: str) -> None:
+    def _touch_recent(self, path: str) -> None:
+        """打开文件时把它记进列表，**但不改变已有顺序**。
+
+        排序规则是用户定的：翻看笔记不算「用过」，只有保存过才把它提到第一位。
+        否则「随手点开几篇看看」就会把顺序搅乱，而这个列表的价值恰恰在于顺序稳定。
+        新出现的文件追加在末尾 —— 不抢占位置。
+        """
+        if path in self._recent:
+            return
+        self._recent.append(path)
+        del self._recent[RECENT_MAX:]
+        self._save_recent()
+        self.sidebar.set_recent(self._recent)
+
+    def _promote_recent(self, path: str) -> None:
+        """保存成功 → 把它提到第一位。这才是「我在这篇上干过活」的证据。"""
+        if self._recent and self._recent[0] == path:
+            return
         if path in self._recent:
             self._recent.remove(path)
         self._recent.insert(0, path)
@@ -366,11 +438,18 @@ class FreePushWindow(QWidget):
         self._save_recent()
         self.sidebar.set_recent(self._recent)
 
-    def _drop_recent(self, path: str) -> None:
-        if path in self._recent:
-            self._recent.remove(path)
-            self._save_recent()
-            self.sidebar.set_recent(self._recent)
+    def _remove_recent(self, path: str) -> None:
+        """把一条从「最近打开」里移除。
+
+        **不关掉正在编辑的文档** —— 用户的意图是「别老在这儿占地方」，
+        不是「我不想再编辑这个文件了」。真要关，他自己会关。
+        """
+        if path not in self._recent:
+            return
+        self._recent.remove(path)
+        self._save_recent()
+        self.sidebar.set_recent(self._recent)
+        self.sidebar.highlight_recent(str(self._current) if self._current else None)
 
     # ───────────────────────── 状态刷新 ─────────────────────────
 
@@ -399,6 +478,22 @@ class FreePushWindow(QWidget):
         self.statusbar.set_eol(fileio.EOL_DISPLAY.get(self._eol, self._eol).upper(),
                                warn=self._eol == 'crlf')
 
+    def _apply_sync(self, state: str, *, push: str = 'ready',
+                    text: str | None = None, icon: str | None = None,
+                    desc: str | None = None) -> None:
+        """把同步状态一次性刷到四处：右栏卡片 / Push 按钮 / 状态栏 / 窄条。
+
+        这四处必须一致 —— 只改其中一处，界面就会自己打自己的脸
+        （状态卡片写着「已同步」，状态栏还写着「待 push」）。
+        """
+        if desc is None:
+            self.panel.set_sync_state(state)
+        else:
+            self.panel.set_sync_state(state, desc=desc)
+        self.panel.set_push_state(push, text=text, icon_name=icon)
+        self.statusbar.set_sync(state)
+        self.rail.set_sync_state(state)
+
     def _refresh_sync(self) -> None:
         """按「有没有绑账号 / 有没有纳管 / 有没有改动」决定这一屏该说什么。
 
@@ -408,60 +503,68 @@ class FreePushWindow(QWidget):
         """
         if self._account is None:
             # 账号都没绑，谈同步没有意义 —— 直接引导授权。
-            self.panel.set_sync_state('unlinked')
-            self.panel.set_push_state('ready', text='绑定 GitHub 账号',
-                                      icon_name='github')
-            self.statusbar.set_sync('unlinked')
-            self.rail.set_sync_state('unlinked')
+            # 按钮文案跟着换成「绑定 GitHub 账号」，且**必须可点**：
+            # 灰着不给任何反应是最糟的交互。
+            self._apply_sync('unlinked', text='绑定 GitHub 账号', icon='github')
             return
 
         group = self._current_group()
         managed = bool(group) and core_config.is_managed(self._cfg, self._current)
 
         if self._current is None or self._editor_stack.currentIndex() != 1:
-            self.panel.set_sync_state(
-                'unmanaged',
+            self._apply_sync(
+                'unmanaged', push='disabled',
                 desc=f'已绑定 {self._account.login}。打开一个 txt 后，就能把它纳入管理。')
-            self.panel.set_push_state('disabled')
-            self.statusbar.set_sync('unmanaged')
-            self.rail.set_sync_state('unmanaged')
+            return
+
+        if self._push_busy:
+            self._apply_sync('running', push='running')
             return
 
         if not managed:
             # 两种未纳管：整个文件夹还没关联，或者文件夹纳管了但这一篇没勾
             if group:
                 text = '关联 GitHub 仓库' if not group.get('repo') else '纳入 GitHub 管理'
-                desc = (f'这个文件属于分组「{group.get("name")}」，'
-                        f'但还没被纳入管理。')
+                desc = f'这个文件属于分组「{group.get("name")}」，但还没被纳入管理。'
             else:
                 text = '纳入 GitHub 管理'
                 desc = (f'「{self._current.parent.name}」还没有关联仓库。'
                         f'点下面的按钮开始 —— 只会上传你勾选的文件。')
-            self.panel.set_sync_state('unmanaged', desc=desc)
-            self.panel.set_push_state('ready', text=text)
-            self.statusbar.set_sync('unmanaged')
-            self.rail.set_sync_state('unmanaged')
+            self._apply_sync('unmanaged', text=text, desc=desc)
             return
 
-        if self._push_busy:
-            self.panel.set_sync_state('running')
-            self.panel.set_push_state('running')
-            self.statusbar.set_sync('running')
-            self.rail.set_sync_state('running')
+        if self._dirty:
+            # 有未保存的改动 = 一定有东西要推，**不必**再去读文件比对。
+            # 这个短路挡掉的正是「每敲一个字读一遍源文件 + 工作区副本」的开销。
+            self._apply_sync('pending')
             return
 
-        if pipeline.is_pushed(group, self._current.name) is True:
+        if self._is_pushed(group) is True:
             # 已经推上去、本地也没再改 —— 按钮保持可点（万一远端落后可以重推），
             # 但视觉压成灰色，不诱导用户去点。
-            self.panel.set_sync_state('synced')
-            self.panel.set_push_state('uptodate', text='已是最新，无需推送')
-            self.statusbar.set_sync('synced')
-            self.rail.set_sync_state('synced')
+            self._apply_sync('synced', push='uptodate', text='已是最新，无需推送')
         else:
-            self.panel.set_sync_state('pending')
-            self.panel.set_push_state('ready')
-            self.statusbar.set_sync('pending')
-            self.rail.set_sync_state('pending')
+            self._apply_sync('pending')
+
+    def _is_pushed(self, group: dict) -> bool | None:
+        """带缓存的 :func:`pipeline.is_pushed`。
+
+        每判断一次都要读源文件 + 工作区副本，而笔记动辄上百 KB；
+        切文件、刷新状态都会走到这里，真读就意味着点一下鼠标要等一次磁盘 IO。
+        用两边的 ``(mtime, size)`` 当失效键 —— 四次 stat 比读两个文件便宜得多，
+        而任一文件被改过就会自动重算，不会给出过期结论。
+        """
+        name = self._current.name if self._current else ''
+        folder = Path(str(group.get('folder') or ''))
+        ws = core_config.workspace_dir(group)
+        key = f'{group.get("id")}\x00{name}'
+        sig = (_file_stamp(folder / name), _file_stamp(ws / name))
+        cached = self._pushed_cache.get(key)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+        result = pipeline.is_pushed(group, name)
+        self._pushed_cache[key] = (sig, result)
+        return result
 
     def _refresh_all(self) -> None:
         self._reload_cfg()
@@ -475,16 +578,29 @@ class FreePushWindow(QWidget):
         self.sidebar.highlight_recent(str(self._current) if self._current else None)
         self._refresh_panel()
 
-    def _reload_cfg(self) -> None:
+    def _reload_cfg(self, force: bool = False) -> None:
+        """读回配置。
+
+        文件没变就直接用内存里的副本 —— 这个函数每次刷新都会走到，
+        而切文件时刷新很频繁，没必要每次都去读一趟磁盘。
+        """
+        stamp = _file_stamp(core_config.CONFIG_PATH)
+        if not force and stamp is not None and stamp == self._cfg_stamp:
+            return
         try:
             self._cfg = core_config.load()
             self._cfg_error = ''
         except core_config.ConfigError as exc:
             self._cfg = core_config.blank_config()
             self._cfg_error = str(exc)
+        self._cfg_stamp = stamp
 
     def _refresh_groups(self) -> None:
-        """把配置里的分组渲染到左栏「受管理的文件夹」。"""
+        """把配置里的分组渲染到左栏「受管理的文件夹」。
+
+        内容没变就**不重建控件树**：重建会把各分组的展开/折叠状态
+        连同滚动位置一起抹掉，而切文件时这个函数每次都会走到。
+        """
         view = []
         for g in core_config.groups(self._cfg):
             folder = Path(str(g.get('folder') or ''))
@@ -494,6 +610,10 @@ class FreePushWindow(QWidget):
                 'folder': str(folder),
                 'files': [str(folder / n) for n in core_config.managed_names(g)],
             })
+        sig = repr(view)
+        if sig == self._groups_sig:
+            return
+        self._groups_sig = sig
         self.sidebar.set_managed(view)
 
     def _current_group(self) -> dict | None:
@@ -519,15 +639,31 @@ class FreePushWindow(QWidget):
                             group=str(group.get('name') or ''))
         self.statusbar.set_owner(str(group.get('name') or ''), str(group.get('repo') or ''))
 
-        ws = core_config.workspace_dir(group)
-        records = []
-        if ws.is_dir():
-            for c in gitops.recent_commits(ws, 5):
-                records.append({'hash': c['hash'], 'message': c['message'],
-                                'relative': _relative_time(c['ts'])})
+        records = self._group_history(group)
         self.panel.set_history(records)
         if records:
             self.panel.set_last_sync(records[0]['relative'], records[0]['hash'])
+
+    def _group_history(self, group: dict) -> list[dict]:
+        """该工作区的提交列表（带缓存）。
+
+        读它要起一个 git 子进程。切文件时右栏要重画，若不缓存，
+        每点一次侧栏就白等一次子进程启动 —— 用户看到的就是
+        「点了没反应，过一会儿才切过去」。
+        """
+        ws = core_config.workspace_dir(group)
+        if not (ws / '.git').is_dir():
+            return []                      # 还没推过：连 .git 都没有，不必问 git
+        sig = _refs_stamp(ws)
+        cached = self._hist_cache.get(str(ws))
+        if sig is not None and cached is not None and cached[0] == sig:
+            return cached[1]
+        records = [{'hash': c['hash'], 'message': c['message'],
+                    'relative': _relative_time(c['ts'])}
+                   for c in gitops.recent_commits(ws, 5)]
+        if sig is not None:
+            self._hist_cache[str(ws)] = (sig, records)
+        return records
 
     # ───────────────────────── 界面状态（字号 / 栏显隐） ─────────────────────────
 
@@ -673,20 +809,27 @@ class FreePushWindow(QWidget):
         return dlg.group
 
     def do_push(self, group: dict) -> None:
-        """先本地暂存并让用户确认（这些都不联网），确认之后才真的推。"""
+        """先本地整理并让用户确认（这一阶段不联网），确认之后才真的推。
+
+        整理也要后台跑：它要起十来个 git 进程、读写成堆文件，放在界面线程上
+        就是「点了 Push 之后整窗僵住两三秒」。用户只会以为软件卡死了。
+        """
+        if self._push_busy:
+            return
         self._push_log_lines = []
         self._push_busy = True
+        self._push_group = group          # 整理是异步的，确认层要用回同一个分组
         self._refresh_sync()
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-        try:
-            staged = pipeline.stage_group(group, account=account_mod.info(),
-                                          on_log=self._push_log)
-        except Exception as exc:  # noqa: BLE001
-            self._push_failed('同步到工作区时出错。', repr(exc))
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-            self._push_busy = False
+        self.panel.set_progress('preparing')
+        worker = StageWorker(group, account=account_mod.info(),
+                             on_log=self._push_log)
+        worker.done.connect(self._on_stage_done)
+        start_worker(worker)
+
+    def _on_stage_done(self, staged) -> None:
+        """整理完成：要么直接失败，要么弹确认层让用户过目这次要推什么。"""
+        self._push_busy = False
+        self.panel.set_progress(None)
 
         if not staged.ok:
             self._push_failed(staged.message, staged.detail, staged.warnings)
@@ -696,6 +839,7 @@ class FreePushWindow(QWidget):
             QMessageBox.information(self, '无需推送', staged.message)
             return
 
+        group = self._push_group or self._current_group() or {}
         dlg = PushDialog(group, staged, self)
         if dlg.exec() != QDialog.Accepted:
             self._refresh_all()
@@ -704,10 +848,11 @@ class FreePushWindow(QWidget):
         token = self._account.token if self._account else ''
         self._push_busy = True
         self._refresh_sync()
+        self.panel.set_progress('pushing')
         worker = PushWorker(group, staged, message=dlg.message, keep=dlg.keep,
                             token=token)
         worker.done.connect(self._on_push_done)
-        start_push_worker(worker)
+        start_worker(worker)
 
     def _push_log(self, text: str) -> None:
         self._push_log_lines.append(str(text))
@@ -715,6 +860,7 @@ class FreePushWindow(QWidget):
 
     def _on_push_done(self, result) -> None:
         self._push_busy = False
+        self.panel.set_progress(None)
         self._refresh_all()
 
         if result.ok:
@@ -732,6 +878,7 @@ class FreePushWindow(QWidget):
     def _push_failed(self, message: str, detail: str = '',
                      warnings: list[str] | None = None) -> None:
         self._push_busy = False
+        self.panel.set_progress(None)
         self._refresh_all()
         self.panel.set_sync_state('failed', desc=message)
         self.panel.set_push_state('failed')

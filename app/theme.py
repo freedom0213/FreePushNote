@@ -218,7 +218,7 @@ def qss() -> str:
         padding-left: 8px;
     }}
     QListWidget#NoteTree::item:hover, QTreeWidget#NoteTree::item:hover {{
-        background: {alpha('#FFFFFF', 0.05)};
+        background: {BG_HOVER};
     }}
     QListWidget#NoteTree::item:selected, QTreeWidget#NoteTree::item:selected {{
         background: {BG_SELECTED};
