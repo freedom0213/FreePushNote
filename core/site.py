@@ -31,11 +31,24 @@ def harden_breaks(lines: list[str]) -> list[str]:
     笔记习惯是「一行一个要点」，靠换行分条；但 Markdown 会把单个换行合并成一段。
     这件事交给构建脚本自动完成，真源里就不需要夹带任何隐藏字符。
     空行 = 真正的段落分隔，保持不动；标题行也不动。
+
+    **代码围栏（````` ``` ````` / ``~~~``）内部不动** —— 否则那两个尾随空格
+    会变成代码内容的一部分，把 Java 代码悄悄改掉。
     """
-    out = []
+    out: list[str] = []
+    fence = ''
     for ln in lines:
         s = ln.rstrip()
-        if not s or s.startswith('#'):
+        head = s.lstrip()
+        if head.startswith('```') or head.startswith('~~~'):
+            marker = head[:3]
+            if fence == '':
+                fence = marker
+            elif fence == marker:
+                fence = ''
+            out.append(s)
+            continue
+        if fence or not s or s.startswith('#'):
             out.append(s)
         else:
             out.append(s + '  ')
@@ -106,14 +119,33 @@ def _sync_assets(src_dir: Path, dst_dir: Path) -> int:
     return changed
 
 
+def _html_escape(s: str) -> str:
+    return (str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            .replace('"', '&quot;'))
+
+
+def _js_string(s: str) -> str:
+    """把任意文本变成**带引号的** JS 字符串字面量（含引号转义与换行处理）。"""
+    out = (str(s).replace('\\', '\\\\').replace("'", "\\'")
+           .replace('\n', '\\n').replace('\r', ''))
+    return f"'{out}'"
+
+
 def render_index(title: str, desc: str, *, template_path: Path | None = None,
-                 search_placeholder: str = '搜索题目', name: str | None = None) -> str:
+                 search_placeholder: str = '搜索笔记', name: str | None = None) -> str:
+    """渲染 docsify 入口页。
+
+    模板里的占位符分两种上下文，**不能一律直接替换**：
+    ``{{TITLE}}`` / ``{{DESC}}`` 在 HTML 里（要转义 ``<`` ``&``），
+    ``{{NAME}}`` / ``{{SEARCH_PLACEHOLDER}}`` 在 JS 里（要带引号并转义引号）。
+    笔记标题是用户随手写的，这两种转义少一个就会把页面撑坏。
+    """
     tpl = Path(template_path or DEFAULT_TEMPLATE).read_text(encoding='utf-8')
     return (tpl
-            .replace('{{TITLE}}', title)
-            .replace('{{DESC}}', desc)
-            .replace('{{NAME}}', name or title)
-            .replace('{{SEARCH_PLACEHOLDER}}', search_placeholder))
+            .replace('{{TITLE}}', _html_escape(title))
+            .replace('{{DESC}}', _html_escape(desc))
+            .replace('{{NAME}}', _js_string(name or title))
+            .replace('{{SEARCH_PLACEHOLDER}}', _js_string(search_placeholder)))
 
 
 def build(md_path: str | Path, docs_dir: str | Path, *, title: str | None = None,
@@ -193,5 +225,127 @@ def build(md_path: str | Path, docs_dir: str | Path, *, title: str | None = None
         'chapters': len(chapters),
         'questions': grand_total,
         'answered': grand_answered,
+        'files_changed': changed,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 通用构建器：一个 txt 一页
+# ═══════════════════════════════════════════════════════════════════
+#
+# 上面的 build() 是给「单个 md、按 ## 分章」的题库写的，只有那种形状的笔记能用。
+# FreePushNote 是通用 txt 工具，一个分组里可能躺着十几篇互不相干的随笔，
+# 所以这里再给一个通用构建器：**一篇笔记 = 一个页面**，侧栏列文件名。
+#
+# 两者不冲突：命中「===== 章 ===== + 编号题目」的文件仍由 convert() 展开成章节，
+# 页内照常有多级标题；其余笔记原样成页，不被改写。
+
+#: 与站点自身的文件名冲突的 slug（撞了要加前缀，否则会覆盖首页）
+RESERVED_SLUGS = {'readme', '_sidebar', 'index', 'assets', 'nojekyll'}
+
+#: Windows 不允许出现在文件名里的字符（站点文件也要能落在 Windows 上）
+_BAD_FILE_CHARS = re.compile(r'[#?%&=+<>:"|*\\/\s]+')
+
+
+def page_slug(source_name: str, used: set[str]) -> str:
+    """由原始文件名派生一个安全、稳定、不重复的页面 slug。
+
+    * 保留中文（可读性优先，GitHub Pages 对 UTF-8 路径没问题）
+    * 去掉 Windows 禁用的字符与 URL 里有特殊含义的 ``# ? % &``
+    * 撞上站点自身文件名（README / index / …）时加前缀
+    """
+    stem = Path(str(source_name)).stem
+    s = _BAD_FILE_CHARS.sub('-', stem).strip('-. ')
+    if not s:
+        s = 'page'
+    if s.lower() in RESERVED_SLUGS:
+        s = f'note-{s}'
+    base, n = s, 2
+    while s in used:
+        s = f'{base}-{n}'
+        n += 1
+    used.add(s)
+    return s
+
+
+def build_notes_site(pages: list[dict], out_dir: str | Path, *,
+                     title: str, desc: str | None = None,
+                     assets_src: Path | None = None,
+                     template_path: Path | None = None, on_log=None) -> dict:
+    """把若干篇笔记构建成一个 docsify 站点。
+
+    ``pages`` 形如 ``[{'source': '并发编程.txt', 'title': '并发编程',
+    'markdown': '...'}]`` —— ``markdown`` 是已经准备好的正文
+    （是否经过 :mod:`core.convert` 由调用方决定）。
+
+    产出（全部在 ``out_dir`` 下）::
+
+        index.html      docsify 入口
+        README.md       首页：笔记清单 + 字数统计
+        _sidebar.md     侧栏目录
+        <slug>.md       每篇笔记一页
+        .nojekyll       让 GitHub Pages 跳过 Jekyll（否则 _sidebar.md 会被吃掉）
+        assets/*        本地化的前端资源
+    """
+    log = on_log or (lambda *_a, **_k: None)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    used: set[str] = set()
+    sidebar = ['- [首页](/README.md)']
+    rows: list[str] = []
+    total_chars = total_lines = changed = 0
+
+    for page in pages:
+        source = str(page.get('source') or 'note.txt')
+        page_title = str(page.get('title') or Path(source).stem)
+        body = str(page.get('markdown') or '').lstrip()
+        if not body.startswith('#'):
+            body = f'# {page_title}\n\n{body}'
+        body = re.sub(r'\n{3,}', '\n\n', body).rstrip() + '\n'
+
+        slug = page_slug(source, used)
+        changed += _write_if_changed(out_dir / f'{slug}.md', body)
+
+        chars = len(body)
+        lines = body.count('\n')
+        total_chars += chars
+        total_lines += lines
+
+        sidebar.append(f'- [{page_title}]({slug}.md)')
+        rows.append(f'| [{page_title}]({slug}.md) | {chars} | {lines} |')
+
+    changed += _write_if_changed(out_dir / '_sidebar.md', '\n'.join(sidebar) + '\n')
+
+    home_lines = [f'# {title}', '']
+    if desc:
+        home_lines += [f'> {desc}', '']
+    home_lines += [
+        f'**{len(pages)} 篇笔记 · 共 {total_chars} 字 · {total_lines} 行**',
+        '',
+        '| 笔记 | 字数 | 行数 |',
+        '| :--- | ---: | ---: |',
+        *rows,
+        '',
+        '---',
+        '',
+        '手机上点左上角展开目录、点右上角搜索；表格里的笔记名可以直接点开。',
+        '',
+    ]
+    changed += _write_if_changed(out_dir / 'README.md', '\n'.join(home_lines))
+
+    changed += _write_if_changed(out_dir / '.nojekyll', '')
+    changed += _sync_assets(Path(assets_src or DEFAULT_ASSETS), out_dir / 'assets')
+    changed += _write_if_changed(
+        out_dir / 'index.html',
+        render_index(title, desc or f'{title} · 在线阅读',
+                     template_path=template_path),
+    )
+
+    log(f'站点已构建：{out_dir}（{len(pages)} 篇，共 {total_chars} 字）')
+    return {
+        'pages': len(pages),
+        'chars': total_chars,
+        'lines': total_lines,
         'files_changed': changed,
     }

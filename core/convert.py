@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-CHAP_RE = re.compile(r'^=+\s*(.+?)\s*=+$')
+CHAP_RE = re.compile(r'^=+\s*(.+?)\s*=+$', re.M)
 SEC_RE = re.compile(r'^（[一二三四五六七八九十]+）[^：？]*$')
 Q_RE = re.compile(r'^(\d+)：(.*)$')
 QSKIP_RE = re.compile(r'^（跳过）\s*(\d+)：(.*)$')
@@ -43,13 +43,20 @@ def read_text_auto(path: str | Path) -> tuple[str, str]:
 
     依次尝试 ``utf-8-sig`` / ``utf-8`` / ``gbk``。``utf-8-sig`` 在前，
     这样带 BOM 的文件会顺带把 BOM 去掉，不会污染文档标题。
+
+    ⚠️ **换行一律归一成 ``\\n``**。这里是 ``read_bytes()`` + 手工 decode，
+    没有经过文本模式的「通用换行」转换，所以 CRLF 会原样留下 ——
+    而 Windows 记事本写出来的 txt **全是 CRLF**。留着 ``\\r`` 会让下游
+    以 ``^...$`` 匹配行结构的正则全部失效（``$`` 匹配不到 ``\\r\\n`` 之前），
+    典型症状是「章节标记识别不出来、整篇降级成原样上传」。
     """
     raw = Path(path).read_bytes()
     for enc in ('utf-8-sig', 'utf-8', 'gbk'):
         try:
-            return raw.decode(enc), enc
+            text = raw.decode(enc)
         except UnicodeDecodeError:
             continue
+        return text.replace('\r\n', '\n').replace('\r', '\n'), enc
     raise NoteFormatError(f'无法识别文件编码（已试 utf-8-sig / utf-8 / gbk）：{path}')
 
 
@@ -58,7 +65,15 @@ def detect_mode(text: str) -> str:
 
     * ``site`` —— 有 ``===== 章 =====`` 标记且有编号题目，可以生成文档站；
     * ``raw``  —— 不满足上述条件，**降级为原样上传**，绝不报错。
+
+    ⚠️ ``CHAP_RE`` 必须带 ``re.M``：章节标记很少出现在文件第一行
+    （前面通常还有一行文档标题），少了这个标志 ``^`` 只认字符串开头，
+    于是**任何真实笔记都会被判成 raw**，章节模式形同虚设。
+
+    另外这里自己再做一次换行归一：本函数是公开接口，可能被直接喂进
+    带 CRLF 的文本（``$`` 匹配不到 ``\\r\\n`` 之前，同样会判错）。
     """
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
     if CHAP_RE.search(text) and _Q_ANY_RE.search(text):
         return 'site'
     return 'raw'

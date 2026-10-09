@@ -103,6 +103,9 @@ def init_repo(path: str | Path, branch: str = 'main', on_log=None) -> None:
     p.mkdir(parents=True, exist_ok=True)
     log(f'初始化本地仓库：{p}')
     git(p, 'init', '-b', branch)
+    # 中文文件名默认会被 git 转义成 "\346\226\207..." 这种八进制形式，
+    # 任何解析 git 输出的地方（变更清单、状态判断）都会跟着出错。
+    git(p, 'config', 'core.quotepath', 'false')
     ensure_lf_attributes(p, on_log=on_log)
 
 
@@ -141,6 +144,67 @@ def ensure_remote(path: str | Path, repo: str, on_log=None) -> str:
     return url
 
 
+# ---------------------------------------------------------------- 凭据
+
+#: 令牌通过**环境变量**传给 git，绝不进命令行 ——
+#: 命令行参数在进程列表里是明文可见的，等于把令牌挂在任务管理器上。
+TOKEN_ENV_VAR = 'FREEPUSH_GIT_TOKEN'
+TOKEN_USERNAME = 'x-access-token'
+GH_HELPER = '!gh auth git-credential'
+
+
+def token_helper() -> str:
+    """从环境变量读令牌的 git 凭据助手（shell 形式）。
+
+    git 的 ``!`` 助手是交给 ``sh`` 执行的，所以这里写 shell 语法。
+    Git for Windows 自带 sh，三个平台都能跑，不需要额外依赖。
+    """
+    return (f'!f() {{ echo "username={TOKEN_USERNAME}"; '
+            f'echo "password=${TOKEN_ENV_VAR}"; }}; f')
+
+
+def credential_args(token: str | None) -> list[str]:
+    """构造 git 的 ``-c`` 参数：先清掉继承来的助手，再挂上自己的。
+
+    ``-c credential.helper=``（空值）**不能省**：本机全局配置指向
+    git-credential-manager，而它并没有 github.com 的凭据 —— 于是会尝试弹交互窗口，
+    在非交互环境下表现为**静默挂死**（超时且 stdout/stderr 全空，极具误导性）。
+
+    ``token=None`` 时回落到本机的 ``gh`` 凭据，**仅供开发期调试**：
+    别人机器上没装 gh 就用不了，正式链路一律走令牌。
+    """
+    args = ['-c', 'credential.helper=']
+    if token is None:
+        return args + ['-c', f'credential.helper={GH_HELPER}']
+    return args + ['-c', f'credential.helper={token_helper()}']
+
+
+def identity_for_account(login: str, uid: int | None = None) -> tuple[str, str]:
+    """GitHub 账号 → git 提交身份。
+
+    用 GitHub 的 noreply 邮箱规则，提交才能正确归属到这个账号，
+    同时**不把真实邮箱写进仓库历史**。
+    """
+    email = (f'{uid}+{login}@users.noreply.github.com' if uid
+             else f'{login}@users.noreply.github.com')
+    return login, email
+
+
+def ensure_identity_for_account(path: str | Path, login: str, uid: int | None = None,
+                                on_log=None) -> tuple[str, str]:
+    """把提交身份写进**该仓库的局部配置**，不动用户的全局 git 配置。"""
+    log = on_log or (lambda *_a, **_k: None)
+    name, email = identity_for_account(login, uid)
+    git(path, 'config', 'user.name', name)
+    git(path, 'config', 'user.email', email)
+    log(f'提交身份：{name} <{email}>')
+    return name, email
+
+
+def short_hash(path: str | Path) -> str:
+    return stdout_of(git(path, 'rev-parse', '--short', 'HEAD', check=False))
+
+
 # ---------------------------------------------------------------- 提交 / 推送
 
 def add_all(path: str | Path) -> None:
@@ -151,26 +215,30 @@ def commit(path: str | Path, message: str) -> None:
     git(path, 'commit', '-m', message)
 
 
-def push(path: str | Path, *, helper: str = '!gh auth git-credential',
+def push(path: str | Path, *, token: str | None = None,
          retries: int = 3, interval: int = 5, on_log=None,
-         set_upstream: bool = False) -> tuple[bool, int]:
+         set_upstream: bool = True) -> tuple[bool, int]:
     """推送 HEAD 到 origin，失败自动重试。
 
-    返回 ``(是否成功, 实际尝试次数)``。**不做 sys.exit**，失败信息交回调用方展示。
+    ``token`` 给定即用绑定的 OAuth 令牌（正式链路）。
+    返回 ``(是否成功, 实际尝试次数)``。**不抛异常也不 sys.exit** ——
+    失败信息要交回调用方，由界面按错误种类给不同的提示。
     """
     log = on_log or (lambda *_a, **_k: None)
     if not remote_url(path):
         log('!! 尚未配置远程仓库 origin，已跳过推送。')
         return False, 0
 
-    cmd = ['git', '-c', 'credential.helper=',
-           f'-c', f'credential.helper={helper}', 'push']
+    cmd = ['git', *credential_args(token), 'push']
     cmd += (['-u'] if set_upstream else []) + ['origin', 'HEAD']
 
     env = envprobe.clean_env()
+    if token:
+        env[TOKEN_ENV_VAR] = token
+
     last_detail = ''
     for attempt in range(1, retries + 1):
-        log(f'$ {" ".join(cmd)}    (第 {attempt}/{retries} 次)')
+        log(f'推送中…（第 {attempt}/{retries} 次）')
         try:
             proc = _run(cmd, path, env=env, timeout=PUSH_TIMEOUT)
         except subprocess.TimeoutExpired:
@@ -197,5 +265,6 @@ def push(path: str | Path, *, helper: str = '!gh auth git-credential',
     log('   常见原因：')
     log('     1) 网络 / 代理抖动 —— 过一会儿再点一次「Push」，会自动补上。')
     log('     2) 代理软件没开 —— git 若配了 http.proxy，确认它在运行。')
-    log('     3) 远端有新提交 —— 需要先拉取合并（本工具暂不自动合并）。')
+    log('     3) 授权失效 —— 在设置里重新授权 GitHub 账号。')
+    log('     4) 远端有新提交（例如你曾在网页上编辑）—— 需要先拉取。')
     return False, retries

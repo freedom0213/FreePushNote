@@ -1,10 +1,18 @@
 # -*- coding: utf-8 -*-
-"""自测脚本：不启动 GUI，直接验证 core 各模块。
+"""自测脚本：不启动 GUI，直接验证 core 的底层模块。
 
-用法（在 pushnote 目录下）:
-    py tools/selftest.py
+用法（在 pushnote 目录下）::
 
-遵循「先客观自测，再交付」的原则：任何改动后先跑这里。
+    .venv\\Scripts\\python.exe tools\\selftest.py
+
+三个套件分工（改完代码全跑一遍）::
+
+    tools/selftest.py           envprobe / gitops / config 冒烟
+    tools/auth_selftest.py      GitHub 认证（注入假传输，不联网）
+    tools/pipeline_selftest.py  推送链路（本地 bare 仓库当远端，不联网）
+
+config / convert / site / pipeline 的完整覆盖在 pipeline_selftest.py 里 ——
+那些用例需要真仓库、真文件才能验，放在这里会既慢又重复。
 """
 from __future__ import annotations
 
@@ -40,55 +48,41 @@ def check(name: str, ok: bool, extra: str = '') -> None:
 
 
 def test_config() -> None:
+    """基础冒烟：结构、往返、原子写。完整校验见 pipeline_selftest。"""
     print('== config ==')
 
     cfg = config.blank_config()
-    check('blank_config 结构正确',
-          set(cfg) == {'version', 'defaults', 'bindings', 'active_id'})
+    check('blank_config 是 v2 结构',
+          set(cfg) == {'version', 'defaults', 'groups'} and cfg['version'] == 2)
+    check('站点默认放仓库根（docs_dir 为空）', config.DEFAULTS['docs_dir'] == '')
 
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         cfg_path = td / 'nested' / 'config.json'
-
         check('load 不存在的路径返回空白配置',
-              config.load(cfg_path)['bindings'] == [])
+              config.load(cfg_path)['groups'] == [])
 
-        note = td / 'a.txt'
-        note.write_text('hello', encoding='utf-8')
-        binding = {'id': 'demo', 'name': '演示', 'note_path': str(note),
-                   'repo': 'someone/demo-notes', 'mode': 'auto'}
+        folder = td / '中文笔记'
+        folder.mkdir()
+        (folder / 'a.txt').write_text('x', encoding='utf-8')
 
-        cfg = config.blank_config()
-        config.upsert_binding(cfg, binding)
+        group = config.new_group(folder)
+        group['id'] = 'demo'
+        group['repo'] = 'someone/demo-notes'
+        group['files'] = ['a.txt']
+        config.upsert_group(cfg, group)
         config.save(cfg, cfg_path)
 
         again = config.load(cfg_path)
-        check('save/load 往返一致', again['bindings'][0]['note_path'] == str(note))
+        check('save/load 往返一致', again['groups'][0]['folder'] == str(folder))
         check('落盘为 UTF-8 且中文正常',
-              '演示' in cfg_path.read_text(encoding='utf-8'))
+              '中文笔记' in cfg_path.read_text(encoding='utf-8'))
         check('save 自动创建父目录', cfg_path.exists())
-        check('active_id 自动填充', again['active_id'] == 'demo')
         check('无残留 .tmp 文件', not list(cfg_path.parent.glob('*.tmp')))
-
-        check('合法绑定无错误', config.validate_binding(binding) == [])
-        check('相对路径被拒',
-              any('绝对路径' in e for e in
-                  config.validate_binding({**binding, 'note_path': 'a.txt'})))
-        check('非 .txt 被拒',
-              any('.txt' in e for e in
-                  config.validate_binding({**binding, 'note_path': str(td / 'x.md')})))
-        check('不存在的文件被拒',
-              any('不存在' in e for e in
-                  config.validate_binding({**binding, 'note_path': str(td / 'no.txt')})))
-        check('repo 格式被校验',
-              any('owner/name' in e for e in
-                  config.validate_binding({**binding, 'repo': 'nope'})))
-        check('mode 被校验',
-              any('mode' in e for e in
-                  config.validate_binding({**binding, 'mode': 'xxx'})))
-        check('id 非法被拒',
-              any('id' in e for e in
-                  config.validate_binding({**binding, 'id': 'Bad_ID'})))
+        check('group_by_id 查得到', config.group_by_id(again, 'demo') is not None)
+        check('工作区落在 workspaces/<id> 下',
+              config.workspace_dir(group).name == 'demo'
+              and config.workspace_dir(group).parent == config.WORKSPACES_DIR)
 
         bad = td / 'bad.json'
         bad.write_text('{ not json', encoding='utf-8')
@@ -97,27 +91,6 @@ def test_config() -> None:
             check('坏 JSON 抛 ConfigError', False, '未抛异常')
         except config.ConfigError:
             check('坏 JSON 抛 ConfigError', True)
-
-    check('workdir 显式填写优先',
-          config.workdir_for({'id': 'x', 'workdir': 'C:/tmp'}) == Path('C:/tmp'))
-    check('workdir 默认派生到 repos/<id>',
-          config.workdir_for({'id': 'abc'}).name == 'abc')
-
-    cfg = config.blank_config()
-    with tempfile.TemporaryDirectory() as td:
-        note = Path(td) / 'a.txt'
-        note.write_text('x', encoding='utf-8')
-        base = {'name': 'n', 'note_path': str(note), 'repo': 'a/b', 'mode': 'auto'}
-        config.upsert_binding(cfg, {**base, 'id': 'one'})
-        config.upsert_binding(cfg, {**base, 'id': 'two'})
-        check('upsert 新增两条', len(cfg['bindings']) == 2)
-        config.upsert_binding(cfg, {**base, 'id': 'one', 'name': '改名'})
-        got = config.get_binding(cfg, 'one')
-        check('upsert 覆盖而非新增',
-              len(cfg['bindings']) == 2 and got is not None and got['name'] == '改名')
-        cfg['active_id'] = 'one'
-        config.remove_binding(cfg, 'one')
-        check('remove 后 active 自动转移', cfg['active_id'] == 'two')
 
 
 def test_envprobe() -> None:
@@ -144,7 +117,7 @@ def test_envprobe() -> None:
 def test_gitops() -> None:
     print('== gitops ==')
 
-    # --- 只读探测：现成的 java-notes 仓库 ---
+    # --- 只读探测：现成的 java-notes 仓库（不在就跳过，不算失败）---
     java_notes = ROOT.parent / 'java-notes'
     if java_notes.is_dir():
         check('is_repo(java-notes) 为真', gitops.is_repo(java_notes))
@@ -155,7 +128,7 @@ def test_gitops() -> None:
         check('remote_url 指向 Java-BAGU-notes',
               url.endswith('freedom0213/Java-BAGU-notes.git'), url)
     else:
-        check('java-notes 目录存在', False, str(java_notes))
+        print(f'  [skip] 没有找到 {java_notes}，跳过只读探测')
 
     # --- 写操作：临时仓库（绝不推送）---
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
@@ -165,6 +138,8 @@ def test_gitops() -> None:
         check('init_repo 后 is_repo 为真', gitops.is_repo(repo))
         check('空仓库 head_exists 为假', not gitops.head_exists(repo))
         check('.gitattributes 已生成', (repo / '.gitattributes').exists())
+        check('已关闭 core.quotepath（中文路径不被转义成八进制）',
+              gitops.stdout_of(gitops.git(repo, 'config', 'core.quotepath')) == 'false')
 
         (repo / 'a.txt').write_text('hello\n', encoding='utf-8', newline='\n')
         check('新增文件后 has_changes 为真', gitops.has_changes(repo))
@@ -173,6 +148,7 @@ def test_gitops() -> None:
         gitops.commit(repo, 'chore: test')
         check('提交后 has_changes 为假', not gitops.has_changes(repo))
         check('提交后 head_exists 为真', gitops.head_exists(repo))
+        check('short_hash 可用', len(gitops.short_hash(repo)) >= 7)
 
         url = gitops.ensure_remote(repo, 'someone/demo-notes')
         check('ensure_remote 正确写入 origin',
@@ -184,6 +160,15 @@ def test_gitops() -> None:
         ok, tries = gitops.push(bare, on_log=lambda *_a: None)
         check('无远程时 push 返回 (False, 0) 而非抛异常',
               ok is False and tries == 0, f'{ok} {tries}')
+
+    # --- 认证相关的小工具（真实验证在 auth_selftest / pipeline_selftest）---
+    check('token_helper 从环境变量读令牌',
+          gitops.TOKEN_ENV_VAR in gitops.token_helper())
+    check('令牌不进命令行参数',
+          all('SECRET' not in a for a in gitops.credential_args('SECRET')))
+    name, email = gitops.identity_for_account('someone', 7)
+    check('提交身份用 noreply 邮箱',
+          name == 'someone' and email == '7+someone@users.noreply.github.com')
 
 
 def main() -> int:

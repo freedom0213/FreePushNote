@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>{{TITLE}}</title>
+  <meta name="description" content="{{DESC}}">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+
+  <!-- 前端资源全部本地化：离线可用、不依赖 CDN，也不会因为 CDN 被墙而白屏 -->
+  <link rel="stylesheet" href="assets/vue.css">
+  <link rel="stylesheet" href="assets/dark.css" media="(prefers-color-scheme: dark)">
+  <style>
+    /* docsify 默认把正文限宽得比较窄，笔记里长行多，放宽一点 */
+    .markdown-section { max-width: 900px; }
+    /* 表格/代码块横向滚动，别把手机版面撑破 */
+    .markdown-section table { display: block; overflow-x: auto; }
+    .markdown-section pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <div id="app">加载中…</div>
+
+  <script>
+    window.$docsify = {
+      name: {{NAME}},
+      loadSidebar: true,
+      subMaxLevel: 2,
+      auto2top: true,
+      // hash 路由：GitHub Pages 是纯静态托管，刷新不会 404
+      routerMode: 'hash',
+      search: {
+        placeholder: {{SEARCH_PLACEHOLDER}},
+        noData: '没有找到相关内容',
+        depth: 3
+      },
+      pagination: {
+        previousText: '上一篇',
+        nextText: '下一篇',
+        crossChapter: true
+      },
+      // 手机端点击代码块也能复制
+      copyCode: { buttonText: '复制' }
+    }
+  </script>
+
+  <script src="assets/docsify.min.js"></script>
+  <script src="assets/search.min.js"></script>
+  <script src="assets/docsify-pagination.min.js"></script>
+  <script src="assets/docsify-copy-code.min.js"></script>
+</body>
+</html>
