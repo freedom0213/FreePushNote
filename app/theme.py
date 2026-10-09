@@ -450,6 +450,32 @@ def qss() -> str:
         background: {BG_HOVER};
         border-color: {BORDER_STRONG};
     }}
+    /* 退出登录按钮：描边红，不是实心红 —— 操作是可逆的（重新授权就回来），
+       不必做成需要「二次确认再确认」的恐吓样式 */
+    QPushButton#DangerButton {{
+        background: transparent;
+        color: {ERROR};
+        border: 1px solid {alpha(ERROR, 0.55)};
+        border-radius: 6px;
+        font-size: {FS_SMALL}px;
+        font-weight: 600;
+    }}
+    QPushButton#DangerButton:hover {{
+        background: {alpha(ERROR, 0.12)};
+        border-color: {ERROR};
+    }}
+
+    /* ── 编辑器内嵌查找条（Ctrl+F） ─────────────── */
+    QFrame#FindBar {{
+        background: {BG_PANEL};
+        border-bottom: 1px solid {BORDER};
+    }}
+    QLineEdit#FindInput {{
+        background: transparent;
+        border: none;
+        color: {TEXT_PRIMARY};
+        font-size: {FS_UI}px;
+    }}
     QToolButton#LinkButton {{
         border: none;
         background: transparent;

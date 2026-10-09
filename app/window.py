@@ -46,8 +46,10 @@ from core import config as core_config
 from core import gitops, pipeline
 
 from . import account as account_mod, fileio, icons, theme
+from .widgets.accountdialog import AccountDialog
 from .widgets.authdialog import GitHubAuthDialog
 from .widgets.editor import CodeEditor
+from .widgets.findbar import FindBar
 from .widgets.managedialog import ManageFolderDialog
 from .widgets.pushdialog import PushDialog
 from .workers import PushWorker, StageWorker, start_worker
@@ -187,6 +189,9 @@ class FreePushWindow(QWidget):
         # 这次推送对应的分组（整理在后台线程里跑，确认层要用回同一个分组）
         self._push_group: dict | None = None
 
+        # Windows 无边框窗口的「点任务栏最小化」只允许修一次（见 showEvent）
+        self._taskbar_fixed = False
+
         # ── 缓存 ──
         # 切文件、点鼠标、改一个字都会走到刷新；不缓存就等于每操作一下
         # 都去读盘或起一个 git 进程 —— 表现就是「点了没反应，然后卡一下才动」。
@@ -274,6 +279,7 @@ class FreePushWindow(QWidget):
         self.panel.pull_requested.connect(self.on_pull)
         self.panel.diff_requested.connect(self.on_diff)
         self.panel.settings_requested.connect(self.open_settings)
+        self.panel.account_chip_clicked.connect(self.open_account)
         center_lay.addWidget(self.panel)
 
         self.rail = PanelRail()
@@ -282,6 +288,20 @@ class FreePushWindow(QWidget):
         self.rail.push_requested.connect(self.on_push)
         self.rail.settings_requested.connect(self.open_settings)
         center_lay.addWidget(self.rail)
+
+        # 编辑区 = 查找条 + 编辑器。查找条平时藏着，Ctrl+F 才落下来 ——
+        # 它属于编辑区（找的是这一篇里的词），不占工具栏的位置。
+        self._findbar = FindBar(self.editor)
+        self._findbar.setVisible(False)
+        self._findbar.close_requested.connect(self._close_findbar)
+
+        editor_area = QWidget()
+        editor_lay = QVBoxLayout(editor_area)
+        editor_lay.setContentsMargins(0, 0, 0, 0)
+        editor_lay.setSpacing(0)
+        editor_lay.addWidget(self._findbar)
+        editor_lay.addWidget(self._editor_stack, 1)
+        center_lay.addWidget(editor_area, 1)
 
         inner.addWidget(center, 1)
 
@@ -932,6 +952,38 @@ class FreePushWindow(QWidget):
         dlg.move(geo.x() + (geo.width() - dlg.width()) // 2,
                  geo.y() + (geo.height() - dlg.height()) // 2)
 
+    def open_account(self) -> None:
+        """账户页（N-02）。入口：右栏头部的账号胶囊。
+
+        没绑定时胶囊根本不显示，所以走到这里的账号一定存在 —— 但防御一下
+        也无妨，万一刷新时序出问题，别让用户点了个寂寞。
+        """
+        if self._account is None:
+            self.bind_github_account()
+            return
+        groups = [{'name': str(g.get('name') or ''),
+                   'repo': str(g.get('repo') or '')}
+                  for g in core_config.groups(self._cfg)]
+        dlg = AccountDialog(self._account, groups, parent=self)
+        self._center_dialog(dlg)
+        dlg.reauth_requested.connect(self.bind_github_account)
+        dlg.signed_out.connect(self._on_signed_out)
+        dlg.exec()
+
+    def _on_signed_out(self) -> None:
+        """退出登录：只清凭据与账号信息（app.account.unbind），分组配置原样保留。
+
+        界面上所有依赖账号的地方统一走 _refresh_all —— 它会把 Push 按钮
+        换成「绑定 GitHub 账号」，右栏与状态栏同步回到未绑定态。
+        """
+        account_mod.unbind()
+        self._account = None
+        self._refresh_all()
+        QMessageBox.information(
+            self, '已退出登录',
+            '本机已不再保存这个账号的令牌。\n\n'
+            '笔记和仓库配置都还在，重新授权后照常推送。')
+
     def on_pull(self) -> None:
         QMessageBox.information(self, '尚未接入', 'Pull 会在绑定仓库后开放。')
 
@@ -969,18 +1021,18 @@ class FreePushWindow(QWidget):
         dlg.exec()
 
     def find_in_file(self) -> None:
+        """Ctrl+F：在当前这一篇里找词（内嵌查找条）。
+
+        按文件名找笔记是另一件事，入口在左栏的放大镜 —— 两个入口的分工
+        在设计稿 N-04 里定过。空态（没打开文件）不给反应。
+        """
         if self._editor_stack.currentIndex() == 0:
             return
-        text, ok = QInputDialog.getText(self, '在当前文件中查找', '要查找的内容：')
-        if not ok or not text:
-            return
-        if not self.editor.find(text):
-            # 回到开头再找一次，这样可以从中间继续
-            cursor = self.editor.textCursor()
-            cursor.movePosition(cursor.MoveOperation.Start)
-            self.editor.setTextCursor(cursor)
-            if not self.editor.find(text):
-                QMessageBox.information(self, '没有找到', f'没有找到「{text}」。')
+        self._findbar.open()
+
+    def _close_findbar(self) -> None:
+        self._findbar.hide()
+        self.editor.setFocus()
 
     # ───────────────────────── 侧栏右键菜单 ─────────────────────────
 
@@ -1077,6 +1129,34 @@ class FreePushWindow(QWidget):
                 break
 
     # ───────────────────────── 无边框窗口缩放 ─────────────────────────
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._enable_taskbar_minimize()
+
+    def _enable_taskbar_minimize(self) -> None:
+        """Windows：无边框窗口默认缺 ``WS_MINIMIZEBOX``，点任务栏图标不会最小化。
+
+        Windows 判定「这个窗口能不能被任务栏最小化」看的是窗口样式位，
+        而 ``Qt.FramelessWindowHint`` 建出来的 WS_POPUP 窗口恰好没有它 ——
+        表现就是：标题栏的最小化按钮好使，任务栏图标点了却毫无反应。
+        把 ``WS_MINIMIZEBOX``（顺带 ``WS_MAXIMIZEBOX``，Win+Up 同理）补上即可，
+        不影响 WM_NCHITTEST 的缩放判定。
+        """
+        if not _IS_WINDOWS or self._taskbar_fixed:
+            return
+        try:
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            GWL_STYLE = -16
+            WS_MINIMIZEBOX = 0x00020000
+            WS_MAXIMIZEBOX = 0x00010000
+            style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+            user32.SetWindowLongW(hwnd, GWL_STYLE,
+                                  style | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
+            self._taskbar_fixed = True
+        except Exception:  # noqa: BLE001 - 修不上就维持现状，别让窗口起不来
+            pass
 
     def nativeEvent(self, event_type, message):  # noqa: N802
         """Windows：用 ``WM_NCHITTEST`` 把边缘判定交还给系统。

@@ -250,6 +250,134 @@ def _test_busy_indicator(win, app) -> None:
         check('非 Windows 不加 creationflags', kw == {}, str(kw))
 
 
+def _test_sidebar_search(win) -> None:
+    """[14] 左栏文件名搜索：过滤两个分组、匹配计数、Esc 收起。"""
+    print('\n[14] 左栏文件名搜索')
+    sb = win.sidebar
+    check('搜索框默认收起', sb._search_wrap.isHidden())
+    sb._toggle_search()
+    check('点放大镜后搜索框出现', not sb._search_wrap.isHidden())
+
+    sb.set_recent(['C:/notes/Java八股.txt', 'C:/notes/agent开发.txt',
+                   'C:/notes/读书笔记.txt'])
+    sb.set_managed([
+        {'name': 'Java八股', 'repo': 'freedom0213/Java-BAGU-notes',
+         'folder': 'C:/notes', 'files': ['C:/notes/Java八股.txt',
+                                         'C:/notes/Redis持久化.txt']},
+        {'name': 'Agent开发', 'repo': 'freedom0213/agent-notes',
+         'folder': 'C:/dev', 'files': ['C:/dev/工具链.txt']},
+    ])
+
+    sb._search_box.setText('redis')
+    items = [sb.recent_list.item(i) for i in range(sb.recent_list.count())]
+    check('「最近打开」里不命中的行被隐藏',
+          items[0].isHidden() and items[1].isHidden())
+    check('受管理组里命中的文件仍然显示',
+          not sb.managed_tree.topLevelItem(0).child(1).isHidden())
+    check('同组不命中的文件被隐藏',
+          sb.managed_tree.topLevelItem(0).child(0).isHidden())
+    check('没有命中的组整组隐藏',
+          sb.managed_tree.topLevelItem(1).isHidden())
+    check('计数说「匹配 1 项」', sb._search_match.text() == '匹配 1 项',
+          sb._search_match.text())
+
+    sb._search_box.setText('agent开发')
+    check('组名命中时整组放行',
+          not sb.managed_tree.topLevelItem(1).isHidden()
+          and not sb.managed_tree.topLevelItem(1).child(0).isHidden())
+    check('组名命中后计数按放行的文件行算',
+          sb._search_match.text() == '匹配 2 项', sb._search_match.text())
+
+    sb._search_box.setText('不存在的文件xyz')
+    check('无命中时提示「没有匹配的文件」',
+          sb._search_match.text() == '没有匹配的文件', sb._search_match.text())
+
+    sb._search_box.setText('redis')
+    sb._close_search()
+    check('Esc 关闭后搜索框收起', sb._search_wrap.isHidden())
+    check('关闭时过滤词已清空', sb._search_box.text() == '')
+    check('关闭后所有行恢复显示',
+          not items[0].isHidden()
+          and not sb.managed_tree.topLevelItem(1).isHidden())
+
+
+def _test_findbar(win, app) -> None:
+    """[15] 内嵌查找条：输入即跳、计数、Enter/Esc。"""
+    from PySide6.QtCore import QPoint
+
+    print('\n[15] 编辑器内嵌查找条（Ctrl+F）')
+    fb = win._findbar
+    check('查找条默认隐藏', fb.isHidden())
+
+    src = _TMP / 'findsrc.txt'
+    src.write_text('第一段没有关键词。\nRedis 的持久化分两种。\n'
+                   '第二种持久化是 AOF。\n结尾。\n', encoding='utf-8')
+    win.load_path(str(src))
+    win.find_in_file()
+    check('Ctrl+F 后查找条出现', not fb.isHidden())
+    # 焦点断言在 offscreen 下没有意义（没有窗口系统），只验证打开动作本身
+
+    fb._input.setText('持久化')
+    app.processEvents()
+    check('输入即跳到第一个命中', '持久化' in win.editor.textCursor().selectedText(),
+          win.editor.textCursor().selectedText())
+    fb._rescan()
+    check('计数给出「1 / 2」', fb._count.text() == '1 / 2', fb._count.text())
+
+    fb._find_next()
+    check('Enter 跳到下一个命中', '持久化' in win.editor.textCursor().selectedText())
+    check('计数更新为「2 / 2」', fb._count.text() == '2 / 2', fb._count.text())
+
+    fb._find_next()
+    check('到底后绕回开头', '持久化' in win.editor.textCursor().selectedText())
+
+    fb._input.setText('一定不存在的词xyz')
+    app.processEvents()
+    check('查不到时提示「无结果」', fb._count.text() == '无结果', fb._count.text())
+
+    fb.close_requested.emit()
+    check('Esc 关闭后查找条收起', fb.isHidden())
+
+
+def _test_account_page(win, app) -> None:
+    """[16] 账户页与退出登录（放在最后：退出会清掉账号）。"""
+    from app.widgets import accountdialog as ad_mod
+    from app.widgets.accountdialog import AccountDialog
+
+    print('\n[16] 账户页与退出登录')
+    acct = account_mod.session()
+    check('前提：账号处于已绑定状态', acct is not None)
+
+    groups = [{'name': 'Java八股', 'repo': 'freedom0213/Java-BAGU-notes'},
+              {'name': 'Agent开发', 'repo': ''}]
+    dlg = AccountDialog(acct, groups, parent=win)
+    check('头像圆片用了账号首字母', dlg._account.login.startswith('t'))
+    check('退出按钮存在且初始可见', not dlg._signout_btn.isHidden())
+
+    dlg._show_signout_confirm()
+    check('点「退出登录」后确认区出现', not dlg._confirm_wrap.isHidden())
+    check('原按钮隐藏', dlg._signout_btn.isHidden())
+    dlg._hide_signout_confirm()
+    check('「取消」后确认区收回', dlg._confirm_wrap.isHidden()
+          and not dlg._signout_btn.isHidden())
+
+    fired = []
+    dlg.signed_out.connect(lambda: fired.append(1))
+    dlg._do_signout()
+    check('确认退出后发出 signed_out 信号', fired == [1])
+
+    # 退出链路：unbind 清凭据、界面回到未绑定态
+    win._on_signed_out()
+    check('退出后内存会话清空', win._account is None)
+    check('退出后磁盘凭据一并清掉', account_mod.session() is None)
+    check('Push 按钮回到「绑定 GitHub 账号」',
+          win.panel.push_button.text() == '绑定 GitHub 账号',
+          win.panel.push_button.text())
+    check('分组配置还在（退出不清关联）',
+          win.sidebar.managed_tree.topLevelItemCount() >= 1)
+    check('账号胶囊隐藏', win.panel._account_chip.isHidden())
+
+
 def main() -> int:  # noqa: C901
     print('=' * 66)
     print('FreePushNote 界面接线自测（offscreen，不联网）')
@@ -509,6 +637,9 @@ def main() -> int:  # noqa: C901
     _test_refresh_caches(win, folder)
     _test_editor_stats(win)
     _test_busy_indicator(win, app)
+    _test_sidebar_search(win)
+    _test_findbar(win, app)
+    _test_account_page(win, app)   # 放最后：退出登录会清掉账号
 
     print('\n' + '=' * 66)
     print(f'通过 {PASS} / {PASS + FAIL}')

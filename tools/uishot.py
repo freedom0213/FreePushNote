@@ -219,6 +219,53 @@ def main() -> int:
         win.panel._progress.parentWidget().grab().save(str(p))
         produced.append(p)
         win.panel.set_progress(None)
+        win.panel.set_push_state('disabled')
+        win.panel.set_sync_state('unmanaged')
+
+    def shoot_new_features() -> None:
+        """三个新界面：侧栏文件名搜索 / 内嵌查找条 / 账户页。"""
+        from app import account as account_mod
+        from app.widgets.accountdialog import AccountDialog
+
+        # ── 侧栏搜索：点开放大镜，输入一个只命中部分文件的词 ──
+        sb = win.sidebar
+        sb._toggle_search()
+        sb._search_box.setText('Redis')
+        app.processEvents()
+        p = out_dir / 'ui_14_sidebar_search.png'
+        win.grab().save(str(p))
+        produced.append(p)
+        sb._close_search()
+
+        # ── 内嵌查找条：Ctrl+F，输入即跳到第一个命中 ──
+        win.find_in_file()
+        win._findbar._input.setText('容器')
+        app.processEvents()
+        p = out_dir / 'ui_15_findbar.png'
+        win.grab().save(str(p))
+        produced.append(p)
+        win._findbar.close_requested.emit()
+
+        # ── 账户页：用假账号（PUSHNOTE_HOME 已重定向，不碰真实配置）──
+        acct = account_mod.bind(
+            ghauth.Account(login='freedom0213', name='freedom', id=1),
+            'gho_FAKE_TOKEN_FOR_SHOT')
+        groups = [{'name': 'Java八股', 'repo': 'freedom0213/Java-BAGU-notes'},
+                  {'name': 'Agent开发', 'repo': 'freedom0213/agent-notes'}]
+        dlg = AccountDialog(acct, groups, parent=win)
+        dlg.setModal(False)
+        dlg.show()
+        app.processEvents()
+        p = out_dir / 'ui_16_account.png'
+        dlg.grab().save(str(p))
+        produced.append(p)
+
+        dlg._show_signout_confirm()
+        app.processEvents()
+        p = out_dir / 'ui_17_account_confirm.png'
+        dlg.grab().save(str(p))
+        produced.append(p)
+        dlg.reject()
 
     def run() -> None:
         shoot('ui_01_empty.png')                    # 空态
@@ -241,6 +288,7 @@ def main() -> int:
         win.editor.set_font_size(16)
 
         shoot_recent_and_busy()
+        shoot_new_features()
 
         dlg = GitHubAuthDialog(win)
         dlg.setModal(False)

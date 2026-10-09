@@ -17,11 +17,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QStyle, QStyledItemDelegate,
-                               QStyleOptionViewItem, QToolButton, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QStyle,
+                               QStyledItemDelegate, QStyleOptionViewItem,
+                               QToolButton, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from .. import icons, theme
 
@@ -212,9 +213,38 @@ class Sidebar(QFrame):
 
         # ── 第一组：最近打开 ──
         self._recent_header = _GroupHeader('最近打开')
+        self._recent_header.add_button(
+            'search', '按文件名查找笔记').clicked.connect(self._toggle_search)
         self._recent_header.add_button('panel-left-hide', '收起侧栏').clicked.connect(
             self.collapse_requested)
         root.addWidget(self._recent_header)
+
+        # 文件名搜索框：默认收起（N-04 ②），点放大镜才出现，不常驻占空间。
+        # 它过滤的是**下面两个分组一起** —— 用户不想记得文件在哪个组里。
+        self._search_wrap = QFrame()
+        sw = QVBoxLayout(self._search_wrap)
+        sw.setContentsMargins(8, 0, 8, 4)
+        sw.setSpacing(3)
+        self._search_box = QLineEdit()
+        self._search_box.setObjectName('Input')
+        self._search_box.setPlaceholderText('按文件名查找…')
+        self._search_box.setClearButtonEnabled(True)
+        self._search_box.setFixedHeight(26)
+        self._search_box.textChanged.connect(lambda _t: self._apply_filter())
+        sw.addWidget(self._search_box)
+        self._search_match = QLabel('')
+        self._search_match.setStyleSheet(
+            f'color: {theme.TEXT_FAINT}; font-size: {theme.FS_LABEL}px;'
+            f'padding-left: 6px;')
+        self._search_match.setVisible(False)
+        sw.addWidget(self._search_match)
+        self._search_wrap.setVisible(False)
+        root.addWidget(self._search_wrap)
+
+        # Esc = 清空并收起，回到平时的两段列表
+        esc = QShortcut(QKeySequence(Qt.Key_Escape), self._search_box)
+        esc.setContext(Qt.WidgetShortcut)
+        esc.activated.connect(self._close_search)
 
         self.recent_list = _RecentList()
         self.recent_list.setObjectName('NoteTree')
@@ -286,6 +316,68 @@ class Sidebar(QFrame):
 
         self._refresh_empty()
 
+    # ───────────────────────── 文件名搜索 ─────────────────────────
+
+    def _toggle_search(self) -> None:
+        if self._search_wrap.isVisible():
+            self._close_search()
+        else:
+            self._search_wrap.setVisible(True)
+            self._search_box.setFocus()
+
+    def _close_search(self) -> None:
+        self._search_box.clear()
+        self._search_wrap.setVisible(False)
+
+    def _apply_filter(self) -> None:
+        """把搜索词套到两个分组上：命中的显示、其余隐藏。
+
+        分组名命中 → 整组照常显示；否则只有文件名命中的行显示，
+        所在组跟着露出来（并展开）。计数是「看得见的文件行数」，不含分组头。
+        """
+        q = self._search_box.text().strip().lower()
+
+        if not q:
+            for i in range(self.recent_list.count()):
+                self.recent_list.item(i).setHidden(False)
+            for t in range(self.managed_tree.topLevelItemCount()):
+                top = self.managed_tree.topLevelItem(t)
+                top.setHidden(False)
+                for c in range(top.childCount()):
+                    top.child(c).setHidden(False)
+            self._search_match.setVisible(False)
+            return
+
+        matched = 0
+
+        # 最近打开：直接按文件名比
+        for i in range(self.recent_list.count()):
+            item = self.recent_list.item(i)
+            path = item.data(_ROLE_PATH) or ''
+            hit = q in Path(path).name.lower()
+            item.setHidden(not hit)
+            matched += hit
+
+        # 受管理的文件夹：组名命中 = 整组放行，否则逐个文件比
+        for t in range(self.managed_tree.topLevelItemCount()):
+            top = self.managed_tree.topLevelItem(t)
+            group_hit = q in (top.text(0) or '').lower()
+            group_matched = False
+            for c in range(top.childCount()):
+                child = top.child(c)
+                path = child.data(0, _ROLE_PATH) or ''
+                hit = group_hit or q in Path(path).name.lower()
+                child.setHidden(not hit)
+                matched += hit
+                group_matched |= hit
+            top.setHidden(not group_matched)
+            if group_matched:
+                top.setExpanded(True)
+
+        self._search_match.setText(
+            f'匹配 {matched} 项' if matched else '没有匹配的文件')
+        self._search_match.setVisible(True)
+
     # ───────────────────────── 数据填充 ─────────────────────────
 
     def set_recent(self, paths: list[str]) -> None:
@@ -299,6 +391,7 @@ class Sidebar(QFrame):
             item.setSizeHint(QSize(0, 28))
             self.recent_list.addItem(item)
         self._refresh_empty()
+        self._apply_filter()      # 搜索开着时重建的列表也要套上当前的过滤词
 
     def set_managed(self, groups: list[dict]) -> None:
         """``groups`` = [{name, repo, folder, files: [路径, ...]}, ...]"""
@@ -321,6 +414,7 @@ class Sidebar(QFrame):
             self.managed_tree.addTopLevelItem(top)
             top.setExpanded(True)
         self._refresh_empty()
+        self._apply_filter()
 
     def highlight_recent(self, path: str | None) -> None:
         """让当前正在编辑的文件在「最近打开」里高亮。"""

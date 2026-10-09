@@ -125,6 +125,7 @@ class PushPanel(QFrame):
     pull_requested = Signal()
     diff_requested = Signal()
     settings_requested = Signal()
+    account_chip_clicked = Signal()     # 点头部账号胶囊 → 打开账户页
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -181,8 +182,11 @@ class PushPanel(QFrame):
 
         # 已连接的账号。绑完之后界面上得有地方一直显示它 ——
         # 否则用户没法一眼确认「我推的是哪个账号」，推错账号是很难发现的错误。
+        # 它同时是账户页的入口：能一直看见的东西就该能点。
         self._account_chip = QLabel('')
         self._account_chip.setVisible(False)
+        self._account_chip.setCursor(Qt.PointingHandCursor)
+        self._account_chip.mousePressEvent = lambda _e: self.account_chip_clicked.emit()  # type: ignore[method-assign]
         lay.addWidget(self._account_chip)
 
         lay.addStretch(1)
@@ -434,7 +438,8 @@ class PushPanel(QFrame):
             f'border-radius: 4px; padding: 2px 6px;'
             f'font-family: {theme.MONO_STACK};')
         self._account_chip.setToolTip(
-            '账号凭据可能已失效，建议重新授权' if warn else '已连接的 GitHub 账号')
+            '账号凭据可能已失效，建议重新授权' if warn
+            else f'已连接的 GitHub 账号，点击查看账户信息')
         self._account_chip.setVisible(True)
 
     def set_last_sync(self, relative: str | None, short_hash: str | None = None) -> None:
