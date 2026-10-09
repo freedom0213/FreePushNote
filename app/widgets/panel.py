@@ -119,6 +119,12 @@ class PushPanel(QFrame):
             f'border-radius: 4px; padding: 2px 6px; font-family: {theme.MONO_STACK};')
         lay.addWidget(chip)
 
+        # 已连接的账号。绑完之后界面上得有地方一直显示它 ——
+        # 否则用户没法一眼确认「我推的是哪个账号」，推错账号是很难发现的错误。
+        self._account_chip = QLabel('')
+        self._account_chip.setVisible(False)
+        lay.addWidget(self._account_chip)
+
         lay.addStretch(1)
 
         btn = QToolButton()
@@ -319,6 +325,25 @@ class PushPanel(QFrame):
             self._path_icon.setVisible(False)
         self._repo_name.setToolTip(group or '')
 
+    def set_account(self, login: str | None, warn: bool = False) -> None:
+        """面板头部显示当前连接的 GitHub 账号。
+
+        ``warn=True`` 表示凭据可能失效（比如令牌被撤销），用琥珀色提醒。
+        """
+        if not login:
+            self._account_chip.setVisible(False)
+            return
+        color = theme.WARNING if warn else theme.SUCCESS
+        self._account_chip.setText(f'@{login}')
+        self._account_chip.setStyleSheet(
+            f'color: {color}; font-size: 10px;'
+            f'background: {theme.alpha(color, 0.14)};'
+            f'border-radius: 4px; padding: 2px 6px;'
+            f'font-family: {theme.MONO_STACK};')
+        self._account_chip.setToolTip(
+            '账号凭据可能已失效，建议重新授权' if warn else '已连接的 GitHub 账号')
+        self._account_chip.setVisible(True)
+
     def set_last_sync(self, relative: str | None, short_hash: str | None = None) -> None:
         self._last_sync.setText(f'上次同步 {relative}' if relative else '还没有同步过')
         self._last_hash.setText(short_hash or '')
@@ -346,15 +371,18 @@ class PushPanel(QFrame):
             'running': '推送中…',
             'success': '已推送',
             'failed': '重试推送',
+            'uptodate': '已是最新，无需推送',
         }
         self.push_button.setText(text or labels.get(state, 'Push 到 GitHub'))
         self.push_button.setProperty('state', state)
         self.push_button.style().unpolish(self.push_button)
         self.push_button.style().polish(self.push_button)
 
-        self.push_button.setEnabled(state in ('ready', 'failed', 'running', 'success'))
+        self.push_button.setEnabled(
+            state in ('ready', 'failed', 'running', 'success', 'uptodate'))
         name = icon_name or ('check-circle' if state == 'success' else 'push')
-        color = {'running': '#A6BDCD', 'success': theme.BG_APP}.get(
+        color = {'running': '#A6BDCD', 'success': theme.BG_APP,
+                 'uptodate': theme.TEXT_MUTED}.get(
             state, '#FFFFFF' if state in ('ready', 'failed') else theme.TEXT_MUTED)
         self.push_button.setIcon(icons.icon(name, color, 16))
         self._hotkey.setVisible(state in ('ready', 'failed'))

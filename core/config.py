@@ -254,6 +254,27 @@ def make_group_id(cfg: dict, seed: str) -> str:
     return gid
 
 
+#: 用户可能粘贴的各种写法：owner/name、https 链接、git@ 链接，带不带 .git 都行
+_REPO_INPUT_RE = re.compile(
+    r'^(?:https?://(?:www\.)?github\.com/|git@github\.com:)'
+    r'?([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?/*$')
+
+
+def parse_repo_spec(text: str) -> str | None:
+    """把用户随手粘贴的仓库地址收敛成 ``owner/name``；识别不了返回 None。
+
+    与其让用户去记「必须填 owner/name」，不如把常见的四种写法都接住 ——
+    GitHub 网页上复制的地址一定带 ``https://github.com/`` 前缀和 ``.git`` 后缀。
+    """
+    s = (text or '').strip()
+    if not s:
+        return None
+    m = _REPO_INPUT_RE.match(s)
+    if not m:
+        return None
+    return f'{m.group(1)}/{m.group(2)}'
+
+
 def new_group(folder: str | os.PathLike, name: str | None = None) -> dict:
     """按一个本地文件夹构造分组骨架（校验与落库由调用方负责）。"""
     p = Path(folder)

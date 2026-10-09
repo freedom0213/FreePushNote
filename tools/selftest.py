@@ -117,20 +117,9 @@ def test_envprobe() -> None:
 def test_gitops() -> None:
     print('== gitops ==')
 
-    # --- 只读探测：现成的 java-notes 仓库（不在就跳过，不算失败）---
-    java_notes = ROOT.parent / 'java-notes'
-    if java_notes.is_dir():
-        check('is_repo(java-notes) 为真', gitops.is_repo(java_notes))
-        check('head_exists(java-notes) 为真', gitops.head_exists(java_notes))
-        branch = gitops.current_branch(java_notes)
-        check('current_branch 为 main', branch == 'main', branch)
-        url = gitops.remote_url(java_notes)
-        check('remote_url 指向 Java-BAGU-notes',
-              url.endswith('freedom0213/Java-BAGU-notes.git'), url)
-    else:
-        print(f'  [skip] 没有找到 {java_notes}，跳过只读探测')
-
     # --- 写操作：临时仓库（绝不推送）---
+    # 只读探测也在这个临时仓库上做，**不依赖本机任何真实仓库的位置** ——
+    # 之前写死了某一个目录，项目一搬家这些检查就静默跳过了。
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         td = Path(td)
         repo = td / 'repo'
@@ -145,10 +134,36 @@ def test_gitops() -> None:
         check('新增文件后 has_changes 为真', gitops.has_changes(repo))
 
         gitops.add_all(repo)
+        staged_names = sorted(c['name'] for c in gitops.staged_numstat(repo))
+        # .gitattributes 是 init_repo 自己写的（统一 LF），会一起进第一次提交 ——
+        # 这是有意的：仓库里 eol=lf 才不会出现「本地没改却显示整个文件都改了」
+        check('暂存后能让 staged_numstat 读出文件',
+              staged_names == ['.gitattributes', 'a.txt'], str(staged_names))
+        check('暂存后 has_staged_changes 为真', gitops.has_staged_changes(repo))
+
         gitops.commit(repo, 'chore: test')
         check('提交后 has_changes 为假', not gitops.has_changes(repo))
+        check('提交后 has_staged_changes 为假', not gitops.has_staged_changes(repo))
         check('提交后 head_exists 为真', gitops.head_exists(repo))
         check('short_hash 可用', len(gitops.short_hash(repo)) >= 7)
+        check('current_branch 为 main', gitops.current_branch(repo) == 'main',
+              gitops.current_branch(repo))
+
+        # 最近提交：侧栏「最近推送」读的就是它
+        commits = gitops.recent_commits(repo, 3)
+        check('recent_commits 读到一条', len(commits) == 1, str(commits))
+        check('recent_commits 的字段齐全',
+              bool(commits) and set(commits[0]) == {'hash', 'message', 'ts'},
+              str(commits))
+        check('recent_commits 的消息正确',
+              bool(commits) and commits[0]['message'] == 'chore: test',
+              str(commits))
+
+        # 中文路径不能因为编码问题读错（core.quotepath 的作用）
+        (repo / '中文笔记.txt').write_text('内容\n', encoding='utf-8')
+        gitops.add_all(repo)
+        names = [c['name'] for c in gitops.staged_numstat(repo)]
+        check('中文文件名不被转义', names == ['中文笔记.txt'], str(names))
 
         url = gitops.ensure_remote(repo, 'someone/demo-notes')
         check('ensure_remote 正确写入 origin',

@@ -12,13 +12,15 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
-from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame, QHBoxLayout,
-                               QInputDialog, QLabel, QMessageBox, QStackedWidget,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtGui import QCursor, QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame,
+                               QHBoxLayout, QInputDialog, QLabel, QMessageBox,
+                               QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 # ── Windows 专用：让系统自己回答「这个点在窗口的哪个部位」 ──
 #
@@ -41,10 +43,14 @@ if _IS_WINDOWS:
     _HTBOTTOM, _HTBOTTOMLEFT, _HTBOTTOMRIGHT = 15, 16, 17
 
 from core import config as core_config
+from core import gitops, pipeline
 
 from . import account as account_mod, fileio, icons, theme
 from .widgets.authdialog import GitHubAuthDialog
 from .widgets.editor import CodeEditor
+from .widgets.managedialog import ManageFolderDialog
+from .widgets.pushdialog import PushDialog
+from .workers import PushWorker, start_push_worker
 from .widgets.panel import PanelRail, PushPanel
 from .widgets.sidebar import Sidebar, SidebarRail
 from .widgets.statusbar import StatusBar
@@ -54,6 +60,22 @@ from .widgets.toolbar import EditorToolBar
 RECENT_PATH = core_config.CONFIG_DIR / 'recent.json'
 UI_STATE_PATH = core_config.CONFIG_DIR / 'ui.json'
 RECENT_MAX = 12
+
+
+def _relative_time(ts: int) -> str:
+    """Unix 时间戳 → 「刚刚 / 3 分钟前 / 2 小时前」这类相对时间。"""
+    if not ts:
+        return ''
+    delta = max(0, int(time.time()) - int(ts))
+    if delta < 60:
+        return '刚刚'
+    if delta < 3600:
+        return f'{delta // 60} 分钟前'
+    if delta < 86400:
+        return f'{delta // 3600} 小时前'
+    if delta < 86400 * 30:
+        return f'{delta // 86400} 天前'
+    return datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
 
 
 class _EmptyState(QWidget):
@@ -112,6 +134,17 @@ class FreePushWindow(QWidget):
         self._recent: list[str] = self._load_recent()
         # 已绑定的 GitHub 账号。「账号信息 + 令牌」两者都在才算，见 app/account.py
         self._account = account_mod.session()
+        # 绑定配置（分组 / 仓库）的内存副本；界面要频繁读它，不必每次读盘
+        try:
+            self._cfg = core_config.load()
+            self._cfg_error = ''
+        except core_config.ConfigError as exc:
+            self._cfg = core_config.blank_config()
+            self._cfg_error = str(exc)
+        self._push_busy = False
+        # 推送过程的输出。界面上不展示（用户不关心 git 命令），
+        # 但失败时放进「详细信息」里，排查问题全靠它。
+        self._push_log_lines: list[str] = []
 
         self._build_ui()
         self._build_shortcuts()
@@ -367,15 +400,14 @@ class FreePushWindow(QWidget):
                                warn=self._eol == 'crlf')
 
     def _refresh_sync(self) -> None:
-        """按「有没有绑账号 / 有没有打开文件」决定这一屏该说什么。
+        """按「有没有绑账号 / 有没有纳管 / 有没有改动」决定这一屏该说什么。
 
-        目前到「未绑定账号」和「未纳入管理」两档；等纳管流程与仓库绑定接上，
-        这里会扩展成完整的四象限（已同步 / 待推送 / 本地落后 / 分叉）。
+        「这一篇是否已推送」靠 **本地工作区的副本** 判断（见 pipeline.is_pushed）——
+        不联网也能给出诚实结论，而不是凭「用户没再编辑过」去猜。
+        「远端领先 / 双方分叉」需要连远端，留到下一批做。
         """
         if self._account is None:
             # 账号都没绑，谈同步没有意义 —— 直接引导授权。
-            # 注意按钮文案要跟着换成「绑定 GitHub 账号」，且**必须可点**：
-            # 灰着不给任何反应是最糟的交互。
             self.panel.set_sync_state('unlinked')
             self.panel.set_push_state('ready', text='绑定 GitHub 账号',
                                       icon_name='github')
@@ -383,7 +415,10 @@ class FreePushWindow(QWidget):
             self.rail.set_sync_state('unlinked')
             return
 
-        if self._editor_stack.currentIndex() != 1:
+        group = self._current_group()
+        managed = bool(group) and core_config.is_managed(self._cfg, self._current)
+
+        if self._current is None or self._editor_stack.currentIndex() != 1:
             self.panel.set_sync_state(
                 'unmanaged',
                 desc=f'已绑定 {self._account.login}。打开一个 txt 后，就能把它纳入管理。')
@@ -392,32 +427,107 @@ class FreePushWindow(QWidget):
             self.rail.set_sync_state('unmanaged')
             return
 
-        state = 'pending' if self._dirty else 'unmanaged'
-        if self._dirty:
-            self.panel.set_sync_state(state)
-            self.panel.set_push_state('ready')
+        if not managed:
+            # 两种未纳管：整个文件夹还没关联，或者文件夹纳管了但这一篇没勾
+            if group:
+                text = '关联 GitHub 仓库' if not group.get('repo') else '纳入 GitHub 管理'
+                desc = (f'这个文件属于分组「{group.get("name")}」，'
+                        f'但还没被纳入管理。')
+            else:
+                text = '纳入 GitHub 管理'
+                desc = (f'「{self._current.parent.name}」还没有关联仓库。'
+                        f'点下面的按钮开始 —— 只会上传你勾选的文件。')
+            self.panel.set_sync_state('unmanaged', desc=desc)
+            self.panel.set_push_state('ready', text=text)
+            self.statusbar.set_sync('unmanaged')
+            self.rail.set_sync_state('unmanaged')
+            return
+
+        if self._push_busy:
+            self.panel.set_sync_state('running')
+            self.panel.set_push_state('running')
+            self.statusbar.set_sync('running')
+            self.rail.set_sync_state('running')
+            return
+
+        if pipeline.is_pushed(group, self._current.name) is True:
+            # 已经推上去、本地也没再改 —— 按钮保持可点（万一远端落后可以重推），
+            # 但视觉压成灰色，不诱导用户去点。
+            self.panel.set_sync_state('synced')
+            self.panel.set_push_state('uptodate', text='已是最新，无需推送')
+            self.statusbar.set_sync('synced')
+            self.rail.set_sync_state('synced')
         else:
-            # 已打开、但还没纳入管理：按钮要能点，点了进纳管引导。
-            self.panel.set_sync_state(
-                state,
-                desc=f'已绑定 {self._account.login}。这个文件还没纳入管理，'
-                     f'点下面的按钮开始。')
-            self.panel.set_push_state('ready', text='纳入 GitHub 管理')
-        self.statusbar.set_sync(state)
-        self.rail.set_sync_state(state)
+            self.panel.set_sync_state('pending')
+            self.panel.set_push_state('ready')
+            self.statusbar.set_sync('pending')
+            self.rail.set_sync_state('pending')
 
     def _refresh_all(self) -> None:
+        self._reload_cfg()
         self._refresh_title()
         self._update_cursor()
         self._refresh_encoding()
+        self._refresh_groups()
         self._refresh_sync()
         self.toolbar.set_has_file(self._current is not None
                                   or self._editor_stack.currentIndex() == 1)
-        self.statusbar.set_owner(None, None)
-        self.panel.set_repo(None, None, None)
         self.sidebar.highlight_recent(str(self._current) if self._current else None)
-        self.panel.set_changes([])
-        self.panel.set_history([])
+        self._refresh_panel()
+
+    def _reload_cfg(self) -> None:
+        try:
+            self._cfg = core_config.load()
+            self._cfg_error = ''
+        except core_config.ConfigError as exc:
+            self._cfg = core_config.blank_config()
+            self._cfg_error = str(exc)
+
+    def _refresh_groups(self) -> None:
+        """把配置里的分组渲染到左栏「受管理的文件夹」。"""
+        view = []
+        for g in core_config.groups(self._cfg):
+            folder = Path(str(g.get('folder') or ''))
+            view.append({
+                'name': str(g.get('name') or folder.name),
+                'repo': str(g.get('repo') or ''),
+                'folder': str(folder),
+                'files': [str(folder / n) for n in core_config.managed_names(g)],
+            })
+        self.sidebar.set_managed(view)
+
+    def _current_group(self) -> dict | None:
+        if self._current is None:
+            return None
+        return core_config.group_for_path(self._cfg, self._current)
+
+    def _refresh_panel(self) -> None:
+        """右栏的仓库卡片 / 归属 / 最近推送 —— 全部读真实数据。"""
+        self.panel.set_account(self._account.login if self._account else None)
+        group = self._current_group()
+        if group is None:
+            self.panel.set_repo(None, None, None)
+            self.statusbar.set_owner(None, None)
+            self.panel.set_history([])
+            return
+
+        folder = Path(str(group.get('folder') or ''))
+        name = self._current.name if self._current else ''
+        self.panel.set_repo(str(group.get('repo') or ''),
+                            str(group.get('branch') or 'main'),
+                            f'{folder.name}/{name}',
+                            group=str(group.get('name') or ''))
+        self.statusbar.set_owner(str(group.get('name') or ''), str(group.get('repo') or ''))
+
+        ws = core_config.workspace_dir(group)
+        records = []
+        if ws.is_dir():
+            for c in gitops.recent_commits(ws, 5):
+                records.append({'hash': c['hash'], 'message': c['message'],
+                                'relative': _relative_time(c['ts'])})
+        self.panel.set_history(records)
+        if records:
+            self.panel.set_last_sync(records[0]['relative'], records[0]['hash'])
 
     # ───────────────────────── 界面状态（字号 / 栏显隐） ─────────────────────────
 
@@ -511,20 +621,134 @@ class FreePushWindow(QWidget):
     # ───────────────────────── 尚未接入的动作 ─────────────────────────
 
     def on_push(self) -> None:
-        # 账号还没绑：Push 按钮此时就是「绑定 GitHub 账号」，按下去走授权
+        """Push 按钮的全部分支都收在这里 —— 它同时是「下一步该做什么」的入口。
+
+        三种情况分别导向：先绑账号 / 先纳管 / 真的推送。用户只管点同一个按钮。
+        """
+        if self._push_busy:
+            return
         if self._account is None:
             self.bind_github_account()
             return
-        if self._editor_stack.currentIndex() == 0:
+        if self._current is None or self._editor_stack.currentIndex() != 1:
             return
-        QMessageBox.information(
-            self, '还没有关联仓库',
-            f'当前已绑定 {self._account.login}，但这个文件还没有纳入 GitHub 管理。\n\n'
-            '下一步会做的事：\n'
-            '  1. 选择要纳入管理的文件（同一文件夹里可以逐个勾选）\n'
-            '  2. 关联一个 GitHub 仓库\n'
-            '  3. 之后点 Push 就会自动推送\n\n'
-            '这套引导目前还没接入。')
+
+        group = self._current_group()
+        if (group is None
+                or not group.get('repo')
+                or not core_config.is_managed(self._cfg, self._current)):
+            group = self.manage_current_folder(existing=group)
+            if group is None:
+                return
+        self.do_push(group)
+
+    # ───────────────────────── 纳管与推送 ─────────────────────────
+
+    def manage_current_folder(self, existing: dict | None = None) -> dict | None:
+        """打开纳管对话框；确认后落库并刷新。返回最终的分组字典。"""
+        if self._current is None:
+            return None
+        return self.manage_folder_for(self._current, existing=existing)
+
+    def manage_folder_for(self, path: Path, existing: dict | None = None) -> dict | None:
+        """对某个文件所在的文件夹走纳管流程（右键菜单也会用到）。"""
+        preselect = list(core_config.managed_names(existing)) if existing else []
+        if path.name not in preselect:
+            preselect.append(path.name)
+
+        dlg = ManageFolderDialog(path.parent, preselect=preselect,
+                                 existing=existing, parent=self)
+        if dlg.exec() != QDialog.Accepted or dlg.group is None:
+            return None
+
+        self._reload_cfg()
+        core_config.upsert_group(self._cfg, dlg.group)
+        try:
+            core_config.save(self._cfg)
+        except OSError as exc:
+            QMessageBox.warning(self, '没能保存配置',
+                                f'绑定的信息写不进配置文件：\n{exc}')
+            return None
+        self._refresh_all()
+        return dlg.group
+
+    def do_push(self, group: dict) -> None:
+        """先本地暂存并让用户确认（这些都不联网），确认之后才真的推。"""
+        self._push_log_lines = []
+        self._push_busy = True
+        self._refresh_sync()
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+        try:
+            staged = pipeline.stage_group(group, account=account_mod.info(),
+                                          on_log=self._push_log)
+        except Exception as exc:  # noqa: BLE001
+            self._push_failed('同步到工作区时出错。', repr(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._push_busy = False
+
+        if not staged.ok:
+            self._push_failed(staged.message, staged.detail, staged.warnings)
+            return
+        if not staged.has_changes:
+            self._refresh_all()
+            QMessageBox.information(self, '无需推送', staged.message)
+            return
+
+        dlg = PushDialog(group, staged, self)
+        if dlg.exec() != QDialog.Accepted:
+            self._refresh_all()
+            return
+
+        token = self._account.token if self._account else ''
+        self._push_busy = True
+        self._refresh_sync()
+        worker = PushWorker(group, staged, message=dlg.message, keep=dlg.keep,
+                            token=token)
+        worker.done.connect(self._on_push_done)
+        start_push_worker(worker)
+
+    def _push_log(self, text: str) -> None:
+        self._push_log_lines.append(str(text))
+        del self._push_log_lines[:-200]
+
+    def _on_push_done(self, result) -> None:
+        self._push_busy = False
+        self._refresh_all()
+
+        if result.ok:
+            # 成功：按钮先亮成绿色，停一下再回落到「已是最新」
+            self.panel.set_push_state('success', text=f'已推送 {result.commit}')
+            QTimer.singleShot(1800, self._refresh_all)
+            if result.warnings:
+                QMessageBox.information(
+                    self, '推送完成（有提醒）',
+                    f'{result.message}\n\n' + '\n'.join(f'· {w}' for w in result.warnings))
+            return
+
+        self._push_failed(result.message, result.detail, result.warnings)
+
+    def _push_failed(self, message: str, detail: str = '',
+                     warnings: list[str] | None = None) -> None:
+        self._push_busy = False
+        self._refresh_all()
+        self.panel.set_sync_state('failed', desc=message)
+        self.panel.set_push_state('failed')
+        self.statusbar.set_sync('failed')
+        self.rail.set_sync_state('failed')
+
+        text = message
+        if warnings:
+            text += '\n\n' + '\n'.join(f'· {w}' for w in warnings)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle('推送失败')
+        box.setText(text)
+        box.setInformativeText('改动已保存在本地，不会丢失。修好后可以直接重试。')
+        if detail or self._push_log_lines:
+            box.setDetailedText(detail or '\n'.join(self._push_log_lines[-40:]))
+        box.exec()
 
     # ───────────────────────── GitHub 账号绑定 ─────────────────────────
 
@@ -616,7 +840,8 @@ class FreePushWindow(QWidget):
     def _show_file_menu(self, path: str, global_pos: QPoint) -> None:
         from PySide6.QtWidgets import QMenu
         p = Path(path)
-        managed = False     # 阶段 2 接入绑定表后改为真实判断
+        group = core_config.group_for_path(self._cfg, p)
+        managed = bool(group) and core_config.is_managed(self._cfg, p)
 
         menu = QMenu(self)
         act_open_dir = menu.addAction(icons.icon('folder', theme.TEXT_BODY, 13),
@@ -647,7 +872,27 @@ class FreePushWindow(QWidget):
             else:
                 self._rename_file(p)
         elif chosen is act_manage:
-            QMessageBox.information(self, '尚未接入', '纳管 / 移除会在绑定流程接入后开放。')
+            if managed and group is not None:
+                self._remove_from_managed(p, group)
+            else:
+                self.manage_folder_for(p, existing=group)
+
+    def _remove_from_managed(self, path: Path, group: dict) -> None:
+        """把一篇笔记移出白名单；下次推送时它会从仓库里消失。"""
+        if QMessageBox.question(
+                self, '从管理中移除',
+                f'「{path.name}」将不再推送到 GitHub。\n\n'
+                f'下次推送时，它会从仓库里移除（本地文件不受影响）。',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        names = [n for n in core_config.managed_names(group) if n != path.name]
+        core_config.set_files(self._cfg, str(group.get('id')), names)
+        try:
+            core_config.save(self._cfg)
+        except OSError as exc:
+            QMessageBox.warning(self, '没能保存配置', str(exc))
+            return
+        self._refresh_all()
 
     def _rename_file(self, p: Path) -> None:
         new_name, ok = QInputDialog.getText(self, '重命名', '新的文件名：', text=p.name)

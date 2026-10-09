@@ -409,6 +409,22 @@ def test_full_push(folder: Path, bare: Path) -> None:
         commits = gitops.stdout_of(gitops.git(bare, 'log', '--oneline')).splitlines()
         check('没有产生多余的提交', len(commits) == 1, f'实际 {len(commits)} 个')
 
+        # ── 两阶段 API：stage 之后能读出真实的逐文件增删行数
+        #    （界面靠它给出 S-01 弹层里的「3 个文件 · +23 −8」）
+        (folder / '读书笔记.txt').write_text(
+            PLAIN_TXT + '\n后来补的一行。\n', encoding='utf-8')
+        staged = pipeline.stage_group(group, account={'login': 'freedom0213', 'id': 1},
+                                      on_log=lambda *_a: None)
+        check('stage_group 成功', staged.ok, staged.detail)
+        check('stage 不过网也不提交（has_changes 只表示“有东西要推”）',
+              staged.has_changes and bool(staged.workspace))
+        row = next((c for c in staged.changes if c['name'] == '读书笔记.txt'), None)
+        check('变更清单里能找到刚改过的文件', row is not None, str(staged.changes))
+        check('读出了新增行数', bool(row) and row['added'] >= 1, str(row))
+        check('合计增删可用',
+              staged.total_added >= 1 and staged.total_removed >= 0,
+              f'+{staged.total_added} -{staged.total_removed}')
+
         # ── 取消勾选 → 文件应真的从仓库消失
         group['files'] = [n for n in group['files'] if n != '代码片段.txt']
         result3 = pipeline.push_group(group, message='移除一个文件', token='x', retries=1,

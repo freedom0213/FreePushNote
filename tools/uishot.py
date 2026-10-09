@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from PySide6.QtCore import QTimer  # noqa: E402
 
-from core import ghauth  # noqa: E402
+from core import ghauth, gitops, pipeline  # noqa: E402
 
 from app.main import build_app  # noqa: E402
 from app.widgets.authdialog import GitHubAuthDialog  # noqa: E402
@@ -77,6 +77,76 @@ def main() -> int:
         win.grab().save(str(path))
         produced.append(path)
 
+    def shoot_manage_and_push() -> None:
+        """纳管对话框与推送对话框。
+
+        真造一个笔记文件夹 + 本地裸仓库当远端，走**真实暂存**拿到变更清单 ——
+        截图里的 +N −M 是真数字，不是摆拍。
+        """
+        from app.widgets.managedialog import ManageFolderDialog
+        from app.widgets.pushdialog import PushDialog
+
+        base = out_dir / 'dialog_demo'
+        folder = base / '笔记文件夹'
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / '第一篇.txt').write_text(
+            '第一篇笔记\n\n第一行要点。\n第二行要点。\n\n新的一段。\n',
+            encoding='utf-8', newline='\r\n')
+        (folder / '第二篇.txt').write_text(
+            '===== 集合 =====\n\n1：ArrayList 和 LinkedList 的区别？\n\n'
+            '  一个数组，一个链表。\n', encoding='utf-8')
+        (folder / '密码备份.txt').write_text('不该上传的内容\n', encoding='utf-8')
+
+        mng = ManageFolderDialog(folder, preselect=['第一篇.txt'], parent=win)
+        mng.setModal(False)
+        mng.show()
+        app.processEvents()
+        p = out_dir / 'ui_08_manage_1.png'
+        mng.grab().save(str(p))
+        produced.append(p)
+
+        mng._go(1)
+        mng._repo.setText('freedom0213/FreePushNote-test1')
+        app.processEvents()
+        p = out_dir / 'ui_09_manage_2.png'
+        mng.grab().save(str(p))
+        produced.append(p)
+        group = mng._build_group()
+        mng.reject()
+        if group is None:
+            return
+
+        # 真实走一遍暂存（不联网：远端换成本地裸仓库）
+        bare = base / 'remote.git'
+        bare.mkdir(parents=True, exist_ok=True)
+        gitops.git(bare, 'init', '--bare', '-b', 'main', check=False)
+        real_ensure = gitops.ensure_remote
+
+        def local_remote(path, repo, on_log=None):
+            url = bare.as_uri()
+            if gitops.remote_url(path) != url:
+                gitops.git(path, 'remote', 'remove', 'origin', check=False)
+                gitops.git(path, 'remote', 'add', 'origin', url)
+            return url
+
+        gitops.ensure_remote = local_remote
+        try:
+            staged = pipeline.stage_group(
+                group, account={'login': 'freedom0213', 'id': 184794503},
+                on_log=lambda *_a: None)
+        finally:
+            gitops.ensure_remote = real_ensure
+
+        if staged.ok and staged.has_changes:
+            pdlg = PushDialog(group, staged, win)
+            pdlg.setModal(False)
+            pdlg.show()
+            app.processEvents()
+            p = out_dir / 'ui_10_push.png'
+            pdlg.grab().save(str(p))
+            produced.append(p)
+            pdlg.reject()
+
     def shoot_dialog() -> None:
         """认证对话框：等待态 + 失败态。
 
@@ -99,6 +169,7 @@ def main() -> int:
         produced.append(p2)
 
         dlg.reject()
+        shoot_manage_and_push()
         for p in produced:
             print(p)
         app.quit()

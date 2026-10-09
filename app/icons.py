@@ -158,6 +158,15 @@ _TEMPLATES: dict[str, str] = {
                 'stroke-linecap="round"/>'
                 '<path d="M12.2 2.2v3.4h-3.4" stroke="{c}" stroke-width="1.3" '
                 'stroke-linecap="round" stroke-linejoin="round"/></svg>'),
+
+    # ── 复选框（自绘，避免各平台原生 indicator 在深色主题下发白）──
+    # {c} = 方框/填充色，{c2} = 对勾色
+    'checkbox-on': ('<svg viewBox="0 0 15 15"><rect x="0.5" y="0.5" width="14" '
+                    'height="14" rx="3" fill="{c}"/><path d="M4.1 7.6 6.4 9.9 10.9 5.2" '
+                    'stroke="{c2}" stroke-width="1.8" fill="none" '
+                    'stroke-linecap="round" stroke-linejoin="round"/></svg>'),
+    'checkbox-off': ('<svg viewBox="0 0 15 15" fill="none"><rect x="1" y="1" width="13" '
+                     'height="13" rx="3" stroke="{c}" stroke-width="1.3"/></svg>'),
 }
 
 

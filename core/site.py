@@ -292,6 +292,7 @@ def build_notes_site(pages: list[dict], out_dir: str | Path, *,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     used: set[str] = set()
+    slugs: dict[str, str] = {}
     sidebar = ['- [首页](/README.md)']
     rows: list[str] = []
     total_chars = total_lines = changed = 0
@@ -305,6 +306,7 @@ def build_notes_site(pages: list[dict], out_dir: str | Path, *,
         body = re.sub(r'\n{3,}', '\n\n', body).rstrip() + '\n'
 
         slug = page_slug(source, used)
+        slugs[source] = slug
         changed += _write_if_changed(out_dir / f'{slug}.md', body)
 
         chars = len(body)
@@ -348,4 +350,7 @@ def build_notes_site(pages: list[dict], out_dir: str | Path, *,
         'chars': total_chars,
         'lines': total_lines,
         'files_changed': changed,
+        #: 原文文件名 → 页面文件名（不含 .md）。
+        #: 界面要靠它把「取消勾选某篇笔记」映射到「同时不提交它的页面」。
+        'slugs': slugs,
     }

@@ -56,6 +56,35 @@ class PushResult:
     attempts: int = 0
 
 
+@dataclass
+class StageResult:
+    """「已经同步到工作区、但还没提交」的中间态。"""
+
+    ok: bool = False
+    reason: str = REASON_GIT_ERROR
+    message: str = ''
+    detail: str = ''
+    workspace: Path | None = None
+    files: list[str] = field(default_factory=list)
+    #: 逐文件的增删行数：``[{'path','name','added','removed'}, ...]``
+    changes: list[dict] = field(default_factory=list)
+    #: 笔记名 → 它涉及的所有仓库内路径（原文 + 生成的页面）
+    note_paths: dict[str, list[str]] = field(default_factory=dict)
+    #: 站点自动产物（首页 / 侧栏 / index.html / assets/*），不单独提供开关
+    artifact_paths: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    site_stats: dict | None = None
+    has_changes: bool = False
+
+    @property
+    def total_added(self) -> int:
+        return sum(int(c.get('added', 0)) for c in self.changes)
+
+    @property
+    def total_removed(self) -> int:
+        return sum(int(c.get('removed', 0)) for c in self.changes)
+
+
 # ─────────────────────────── 工作区 ───────────────────────────
 
 def workspace_dir(group: dict) -> Path:
@@ -176,34 +205,32 @@ def build_site(group: dict, pages: list[dict], on_log=None) -> dict | None:
 
 
 # ─────────────────────────── 主流程 ───────────────────────────
+#
+# 分两阶段，是为了让界面能在「真正推出去之前」把这次会改哪些文件、
+# 各增删多少行拿给用户看（设计稿 S-01）。第一阶段全是本地操作、不联网：
+#
+#     stage_group()      同步文件 → 生成站点 → git add → 读出逐文件增删行数
+#     finalize_push()    用户确认提交信息后 → commit → push
+#
+# :func:`push_group` 是两者的薄封装，行为与拆分前完全一致（测试都指向它）。
 
-def push_group(group: dict, *, message: str | None = None,
-               names: list[str] | None = None,
-               token: str | None = None,
-               account: dict | None = None,
-               retries: int = 3, on_log=None) -> PushResult:
-    """把分组推送上去。**不抛异常**，所有失败都收进 :class:`PushResult`。
 
-    ``names`` 为 None 时推全部分组内的受管理文件（设计稿 S-01 里可勾选子集）。
-    ``token`` 缺失时不推送 —— 用本机 gh 凭据是开发期的退路，正式链路必须带令牌。
-    """
+def stage_group(group: dict, *, names: list[str] | None = None,
+                account: dict | None = None, on_log=None) -> 'StageResult':
+    """第一阶段：把内容同步进工作区并暂存，返回真实变更清单。**不联网。**"""
     log = on_log or (lambda *_a, **_k: None)
     picked = list(names if names is not None else config.managed_names(group))
     if not picked:
-        return PushResult(reason=REASON_NO_FILES,
-                          message='这个分组里还没有纳入管理的文件。')
-
+        return StageResult(reason=REASON_NO_FILES,
+                           message='这个分组里还没有纳入管理的文件。')
     if not group.get('repo'):
-        return PushResult(reason=REASON_NO_REMOTE, message='还没有关联 GitHub 仓库。')
-    if not token:
-        return PushResult(reason=REASON_NO_REMOTE,
-                          message='还没有绑定 GitHub 账号，无法推送。')
+        return StageResult(reason=REASON_NO_REMOTE, message='还没有关联 GitHub 仓库。')
 
     try:
         ws = prepare_workspace(group, on_log=log)
     except (gitops.GitError, OSError) as exc:
-        return PushResult(reason=REASON_GIT_ERROR,
-                          message='准备工作区失败。', detail=str(exc))
+        return StageResult(reason=REASON_GIT_ERROR,
+                           message='准备工作区失败。', detail=str(exc))
 
     if account and account.get('login'):
         try:
@@ -215,9 +242,9 @@ def push_group(group: dict, *, message: str | None = None,
     clear_workspace(ws)
     pages, warnings = materialize(group, picked, ws, on_log=log)
     if not pages:
-        return PushResult(reason=REASON_NO_FILES,
-                          message='勾选的文件都读不到，本次没有可推送的内容。',
-                          warnings=warnings)
+        return StageResult(reason=REASON_NO_FILES,
+                           message='勾选的文件都读不到，本次没有可推送的内容。',
+                           warnings=warnings)
 
     site_stats = None
     try:
@@ -227,20 +254,98 @@ def push_group(group: dict, *, message: str | None = None,
         warnings.append(f'站点生成失败，已只推送原文：{exc}')
         log(f'!! 站点生成失败：{exc}')
 
-    if not gitops.has_changes(ws):
-        return PushResult(ok=True, reason=REASON_NO_CHANGES,
-                          message='本地内容与 GitHub 一致，没有需要推送的改动。',
-                          files=picked, warnings=warnings, site_stats=site_stats)
-
-    commit_message = (message or '').strip() or config.default_commit_message(
-        group, picked)
     try:
         gitops.add_all(ws)
+        changes = gitops.staged_numstat(ws)
+    except gitops.GitError as exc:
+        return StageResult(reason=REASON_GIT_ERROR, message='暂存改动失败。',
+                           detail=str(exc), warnings=warnings, site_stats=site_stats)
+
+    note_paths, artifact_paths = _split_changes(changes, picked, site_stats)
+    return StageResult(ok=True, workspace=ws, files=picked, changes=changes,
+                       has_changes=bool(changes), warnings=warnings,
+                       site_stats=site_stats, note_paths=note_paths,
+                       artifact_paths=artifact_paths)
+
+
+def _split_changes(changes: list[dict], picked: list[str],
+                   site_stats: dict | None) -> tuple[dict[str, list[str]], list[str]]:
+    """把变更清单分成「属于哪篇笔记」和「站点自动产物」两组。
+
+    界面要让用户按**笔记**来勾选，而不是按一堆生成的 ``.md`` / ``assets/*``。
+    所以这里把每篇笔记自己（``x.txt``）和它的页面（``<slug>.md``）归到一起，
+    其余（首页 / 侧栏 / index.html / 资源）算自动产物，不单独提供开关。
+    """
+    slugs = (site_stats or {}).get('slugs') or {}
+    page_owner = {f'{slug}.md': src for src, slug in slugs.items()}
+    note_set = set(picked)
+
+    note_paths: dict[str, list[str]] = {}
+    artifact_paths: list[str] = []
+    for c in changes:
+        name, path = c.get('name', ''), c.get('path', '')
+        if name in note_set:
+            note_paths.setdefault(name, []).append(path)
+        elif page_owner.get(Path(path).name):
+            note_paths.setdefault(page_owner[Path(path).name], []).append(path)
+        else:
+            artifact_paths.append(path)
+    return note_paths, artifact_paths
+
+
+def finalize_push(group: dict, staged: 'StageResult', *, message: str | None = None,
+                  token: str | None = None, keep: list[str] | None = None,
+                  retries: int = 3, on_log=None) -> PushResult:
+    """第二阶段：提交并推送。
+
+    ``keep`` 给定时只提交这些**仓库内路径**的改动（设计稿 S-01 的勾选）。
+    没被列入的文件会被移出暂存区，**但内容仍留在工作区**，下次推送再带上 ——
+    而不是把它从仓库里删掉。
+
+    注意这里收的是「路径」而不是「文件名」：一次推送的变更清单里既有用户勾选的
+    笔记，也有自动生成的站点产物（``index.html`` / ``<名字>.md`` / ``assets/*``），
+    后者跟着笔记走、不可单独取消。
+    """
+    log = on_log or (lambda *_a, **_k: None)
+
+    if not token:
+        return PushResult(reason=REASON_NO_REMOTE,
+                          message='还没有绑定 GitHub 账号，无法推送。',
+                          files=staged.files, warnings=staged.warnings,
+                          site_stats=staged.site_stats)
+    if not staged.ok or staged.workspace is None:
+        return PushResult(reason=staged.reason, message=staged.message,
+                          detail=staged.detail, files=staged.files,
+                          warnings=staged.warnings, site_stats=staged.site_stats)
+    if not staged.has_changes:
+        return PushResult(ok=True, reason=REASON_NO_CHANGES,
+                          message='本地内容与 GitHub 一致，没有需要推送的改动。',
+                          files=staged.files, warnings=staged.warnings,
+                          site_stats=staged.site_stats)
+
+    ws = staged.workspace
+
+    if keep is not None:
+        keep_set = {str(p) for p in keep}
+        skip = [c['path'] for c in staged.changes if c['path'] not in keep_set]
+        try:
+            gitops.unstage(ws, skip)
+        except gitops.GitError as exc:
+            log(f'!! 取消暂存失败：{exc}')
+        if not gitops.has_staged_changes(ws):
+            return PushResult(ok=True, reason=REASON_NO_CHANGES,
+                              message='选中的文件没有需要推送的改动。',
+                              files=staged.files, warnings=staged.warnings,
+                              site_stats=staged.site_stats)
+
+    commit_message = (message or '').strip() or config.default_commit_message(
+        group, staged.files)
+    try:
         gitops.commit(ws, commit_message)
     except gitops.GitError as exc:
-        return PushResult(reason=REASON_GIT_ERROR,
-                          message='本地提交失败。', detail=str(exc),
-                          warnings=warnings, site_stats=site_stats)
+        return PushResult(reason=REASON_GIT_ERROR, message='本地提交失败。',
+                          detail=str(exc), files=staged.files,
+                          warnings=staged.warnings, site_stats=staged.site_stats)
 
     sha = gitops.short_hash(ws)
     log(f'已提交 {sha}：{commit_message}')
@@ -250,17 +355,43 @@ def push_group(group: dict, *, message: str | None = None,
     except (gitops.GitError, OSError) as exc:
         return PushResult(reason=REASON_PUSH_FAILED, commit=sha,
                           message='推送失败，改动已保存在本地。', detail=str(exc),
-                          files=picked, warnings=warnings, site_stats=site_stats)
+                          files=staged.files, warnings=staged.warnings,
+                          site_stats=staged.site_stats)
 
     if not ok:
         return PushResult(reason=REASON_PUSH_FAILED, commit=sha,
                           message='推送失败，改动已保存在本地，可以重试。',
-                          files=picked, warnings=warnings, site_stats=site_stats,
-                          attempts=attempts)
+                          files=staged.files, warnings=staged.warnings,
+                          site_stats=staged.site_stats, attempts=attempts)
 
     return PushResult(ok=True, reason=REASON_OK, commit=sha,
-                      message=f'已推送 {sha}', files=picked, warnings=warnings,
-                      site_stats=site_stats, attempts=attempts)
+                      message=f'已推送 {sha}', files=staged.files,
+                      warnings=staged.warnings, site_stats=staged.site_stats,
+                      attempts=attempts)
+
+
+def push_group(group: dict, *, message: str | None = None,
+               names: list[str] | None = None,
+               token: str | None = None,
+               account: dict | None = None,
+               retries: int = 3, on_log=None) -> PushResult:
+    """一步推完（暂存 + 提交 + 推送）。**不抛异常**，失败都收进 :class:`PushResult`。
+
+    界面走两阶段（先给用户看变更再推），命令行 / 自动推送用这个更省事。
+    """
+    picked = list(names if names is not None else config.managed_names(group))
+    if not picked:
+        return PushResult(reason=REASON_NO_FILES,
+                          message='这个分组里还没有纳入管理的文件。')
+    if not group.get('repo'):
+        return PushResult(reason=REASON_NO_REMOTE, message='还没有关联 GitHub 仓库。')
+    if not token:
+        return PushResult(reason=REASON_NO_REMOTE,
+                          message='还没有绑定 GitHub 账号，无法推送。')
+
+    staged = stage_group(group, names=picked, account=account, on_log=on_log)
+    return finalize_push(group, staged, message=message, token=token,
+                         retries=retries, on_log=on_log)
 
 
 def detect_new_files(group: dict) -> list[str]:
@@ -271,3 +402,32 @@ def detect_new_files(group: dict) -> list[str]:
     managed = set(config.managed_names(group))
     return [n for n in config.scan_notes(str(group.get('folder') or ''))
             if n not in managed]
+
+
+def is_pushed(group: dict, name: str) -> bool | None:
+    """这一篇本地内容是否与**上一次提交（也就是上次推上来的东西）**一致。
+
+    必须比 HEAD 而不是比工作区的工作树：暂存（stage）会把工作区刷成和源文件
+    一模一样，那时比工作树会误报「已同步」——而它其实还没提交、更没推出去。
+
+    不需要联网就能给出诚实结论。返回 ``None`` 表示判断不了
+    （工作区还没建过 / 源文件读不了），这时界面**不要**硬报「已同步」。
+    """
+    ws = config.workspace_dir(group)
+    if not gitops.is_repo(ws) or not gitops.head_exists(ws):
+        return None
+
+    src = Path(str(group.get('folder') or '')) / name
+    if not src.is_file():
+        return None
+    try:
+        text, _encoding = convert.read_text_auto(src)
+    except convert.NoteFormatError:
+        return None
+
+    proc = gitops.git(ws, 'show', f'HEAD:{Path(name).name}', check=False)
+    if proc.returncode != 0:
+        return False        # 仓库里还没有这个文件 → 肯定没推过
+    # 这里**不能**用 stdout_of（它会 strip），尾随换行也是内容的一部分
+    committed = (proc.stdout or b'').decode('utf-8', errors='replace')
+    return committed == text

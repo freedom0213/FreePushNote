@@ -205,6 +205,78 @@ def short_hash(path: str | Path) -> str:
     return stdout_of(git(path, 'rev-parse', '--short', 'HEAD', check=False))
 
 
+def staged_numstat(path: str | Path) -> list[dict]:
+    """已暂存改动的逐文件增删行数（``git diff --cached --numstat``）。
+
+    给「Push 前先让用户看清这次会推什么」用（设计稿 S-01 的 ``+23 −8``）。
+    调用前需要先 ``add_all``。
+
+    非文本文件 git 会给 ``-``，这时按 0 处理 —— 界面显示 ``+0 −0`` 比显示 ``+-`` 好读。
+    """
+    r = git(path, '-c', 'core.quotepath=false', 'diff', '--cached', '--numstat',
+            check=False)
+    out: list[dict] = []
+    for line in stdout_of(r).splitlines():
+        parts = line.split('\t')
+        if len(parts) < 3:
+            continue
+        added, removed, name = parts[0], parts[1], parts[2]
+        out.append({
+            'path': name,
+            'name': Path(name).name,
+            'added': int(added) if added.isdigit() else 0,
+            'removed': int(removed) if removed.isdigit() else 0,
+        })
+    return out
+
+
+def has_staged_changes(path: str | Path) -> bool:
+    """暂存区里是否有内容（``git diff --cached --quiet`` 为 1 时有）。"""
+    r = git(path, 'diff', '--cached', '--quiet', check=False)
+    return r.returncode == 1
+
+
+def unstage(path: str | Path, paths: list[str]) -> None:
+    """把若干文件移出暂存区，**内容仍留在工作区**。
+
+    用于「只推选中的文件」：用户在设计稿 S-01 的清单里取消勾选某项时，
+    我们只是不提交它的改动 —— 它仍然躺在工作区里，等下一次推送再带上。
+    注意这时候**不能**去清空工作区重建，那样会把该文件从仓库里删掉。
+
+    空仓库（尚无 HEAD）时 ``git reset HEAD`` 不可用，改用 ``git rm --cached``。
+    """
+    if not paths:
+        return
+    if head_exists(path):
+        git(path, 'reset', '-q', 'HEAD', '--', *paths, check=False)
+    else:
+        git(path, 'rm', '--cached', '-q', '--', *paths, check=False)
+
+
+#: 用 ASCII 单元分隔符连接字段 —— 提交信息里可能有 ``|`` ``:`` 这类常见分隔符
+_LOG_SEP = '%x1f'
+
+
+def recent_commits(path: str | Path, limit: int = 5) -> list[dict]:
+    """最近的提交记录（新到旧）：``[{'hash','message','ts'}, ...]``。
+
+    侧栏「最近推送」列表直接用这个 —— 读真实历史，不编造。
+    """
+    r = git(path, 'log', f'-{limit}',
+            f'--format=%h{_LOG_SEP}%s{_LOG_SEP}%ct', check=False)
+    out: list[dict] = []
+    for line in stdout_of(r).splitlines():
+        parts = line.split('\x1f')
+        if len(parts) < 3:
+            continue
+        try:
+            ts = int(parts[2])
+        except ValueError:
+            ts = 0
+        out.append({'hash': parts[0], 'message': parts[1], 'ts': ts})
+    return out
+
+
 # ---------------------------------------------------------------- 提交 / 推送
 
 def add_all(path: str | Path) -> None:

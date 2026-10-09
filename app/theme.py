@@ -287,6 +287,12 @@ def qss() -> str:
         background: {SUCCESS};
         color: {BG_APP};
     }}
+    /* 已是最新：保持可点（远端落后时还能重推），但视觉压灰不诱导点击 */
+    QPushButton#PushButton[state="uptodate"] {{
+        background: #3A3A3C;
+        color: {TEXT_MUTED};
+        border: 1px solid {BORDER_STRONG};
+    }}
 
     /* 次要按钮 */
     QPushButton#GhostButton {{
@@ -451,6 +457,40 @@ def qss() -> str:
         font-size: {FS_TINY}px;
     }}
     QToolButton#LinkButton:hover {{ color: {TEXT_SECOND}; }}
+
+    /* 提示条（纳管 / 推送对话框共用） */
+    QFrame#NoteWarn {{
+        background: {alpha(WARNING, 0.12)};
+        border: 1px solid #4A4030;
+        border-radius: 6px;
+    }}
+    QFrame#NoteInfo {{
+        background: {alpha(PRIMARY, 0.12)};
+        border: 1px solid #2A4256;
+        border-radius: 6px;
+    }}
+
+    /* 输入框 */
+    QLineEdit#Input {{
+        background: {BG_INPUT};
+        border: 1px solid {BORDER};
+        border-radius: {RADIUS_BTN}px;
+        padding: 0 10px;
+        color: {TEXT_PRIMARY};
+    }}
+    QLineEdit#Input:focus {{
+        border-color: {PRIMARY_HOVER};
+    }}
+
+    /* 可滚动的文件清单 */
+    QScrollArea#ScrollHost {{
+        background: {BG_INPUT};
+        border: 1px solid {BORDER};
+        border-radius: 6px;
+    }}
+    QScrollArea#ScrollHost > QWidget > QWidget {{
+        background: transparent;
+    }}
     """
 
 
