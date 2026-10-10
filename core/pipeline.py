@@ -178,8 +178,14 @@ def materialize(group: dict, names: list[str], ws: Path,
             warnings.append(f'{name}：{exc}')
             continue
 
-        # 备份一份进仓库：统一 UTF-8 + LF，这样 GBK 的笔记在 GitHub 上也能正常显示
+        # 备份一份进仓库：统一 UTF-8 + LF，这样 GBK 的笔记在 GitHub 上也能正常显示。
+        # 顺带**统一补上末尾换行**：本地笔记常常「最后一行没敲回车」，而 git 与
+        # 各类网页编辑器都默认以换行结尾 —— 不统一的话，这个纯格式差异会被
+        # 当成内容改动，反复制造「有改动待推送」和假冲突（真机踩过一次）。
+        # 本地文件本身**不动**，_same_text() 会把两边视为同一内容。
         normalized = text.replace('\r\n', '\n').replace('\r', '\n')
+        if normalized and not normalized.endswith('\n'):
+            normalized += '\n'
         (ws / name).write_text(normalized, encoding='utf-8', newline='\n')
 
         mode = convert.detect_mode(text)
@@ -437,7 +443,9 @@ def is_pushed(group: dict, name: str) -> bool | None:
         return False        # 仓库里还没有这个文件 → 肯定没推过
     # 这里**不能**用 stdout_of（它会 strip），尾随换行也是内容的一部分
     committed = (proc.stdout or b'').decode('utf-8', errors='replace')
-    return committed == text
+    # 末尾换行的有无不算改动（仓库侧统一补换行，本地笔记常常没有）——
+    # 否则界面会永远显示「有改动待推送」，而用户什么也没改。
+    return _same_text(committed, text)
 
 
 # ─────────────────────────── 差异预览 ───────────────────────────
@@ -481,8 +489,8 @@ def diff_preview(group: dict, *, names: list[str] | None = None) -> list[dict]:
 
         new = text.replace('\r\n', '\n').replace('\r', '\n')
         old = _head_text(ws, name)
-        if old == new:
-            continue
+        if _same_text(old, new):
+            continue        # 只差末尾换行 → 不算改动，别拿出来吓人
 
         lines: list[str] = []
         added = removed = 0
