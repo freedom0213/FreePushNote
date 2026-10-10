@@ -519,6 +519,19 @@ def test_pull(bare: Path) -> None:
     real_ensure = gitops.ensure_remote
     gitops.ensure_remote = local_remote
     try:
+        # ── 末尾换行差异：真机踩到过的假冲突 ──
+        # 本地笔记常见「最后一行没敲回车」，远端被 GitHub 网页编辑器补了换行。
+        # 严格比较会判成「两边都改了同一处」，让用户面对两个一模一样的选项。
+        from core.pipeline import _same_text
+
+        check('末尾换行不同不算内容改动', _same_text('a\nb\n', 'a\nb'))
+        check('内容不同仍算改动', not _same_text('a\nb\n', 'a\nc\n'))
+
+        _m, _c = gitops.merge_file('a\nb\n34.（标记）\n', 'a\nb\n34.', 'a\nb\n34.\n')
+        check('仅末尾换行不同 → 不报冲突', _c == 0, f'冲突数 {_c}')
+        _m2, _c2 = gitops.merge_file('a\nb\nX\n', 'a\nb\n本地\n', 'a\nb\n远端\n')
+        check('真改了同一处 → 仍然报冲突', _c2 == 1, f'冲突数 {_c2}')
+
         # ── 基线：先推一次，让远端 == 本地 == 共同祖先 ──
         base = pipeline.push_group(group, message='基线', token='fake-token',
                                    retries=1)

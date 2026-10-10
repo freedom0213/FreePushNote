@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -546,7 +547,45 @@ def merge_file(base_text: str, ours_text: str, theirs_text: str) -> tuple[str, i
         merged = (proc.stdout or b'').decode('utf-8', errors='replace')
         if proc.returncode < 0:
             raise GitError(f'三方合并失败（退出码 {proc.returncode}）')
-        return merged, proc.returncode
+        conflicts = proc.returncode
+
+    merged, resolved = _drop_identical_conflicts(merged)
+    return merged, max(conflicts - resolved, 0)
+
+
+#: diff3 格式的一个冲突块：``<<<<<<< ours`` … ``||||||| base`` … ``=======`` … ``>>>>>>> theirs``
+_CONFLICT_BLOCK = re.compile(
+    r'<<<<<<< [^\n]*\n(.*?)(?:\|\|\|\|\|\|\| [^\n]*\n(.*?))?=======\n(.*?)>>>>>>> [^\n]*\n',
+    re.S)
+
+
+def _drop_identical_conflicts(merged: str) -> tuple[str, int]:
+    """把「两边内容其实一样」的冲突块就地解掉，返回 ``(结果, 解掉的块数)``。
+
+    为什么需要这一步：git 通常能自己合掉这种（两边改法相同），**但有一个例外** ——
+    文件末尾的换行状态不一致时会报假冲突。而这一例外在真实笔记里很常见：
+    本地笔记的最后一行往往没敲回车，远端却被 GitHub 网页编辑器补上了换行。
+
+    实测（三个用例，见 pipeline_selftest）：
+        两边都改成 "34."（末尾都有换行）→ 不冲突
+        ours 末尾无换行                      → **报 1 处冲突**
+        theirs 末尾无换行                    → **报 1 处冲突**
+
+    对用户来说这是最糟的一类提示：两边内容一模一样，却要他二选一。
+    所以在这里收掉 —— 判据是「忽略末尾换行后两边完全相同」。
+    """
+    resolved = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal resolved
+        ours = m.group(1) or ''
+        theirs = m.group(3) or ''
+        if ours.rstrip('\n') == theirs.rstrip('\n'):
+            resolved += 1
+            return ours
+        return m.group(0)
+
+    return _CONFLICT_BLOCK.sub(repl, merged), resolved
 
 
 def reset_hard(path: str | Path, rev: str) -> None:

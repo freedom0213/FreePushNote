@@ -585,6 +585,16 @@ def _normalize_newlines(text: str) -> str:
     return text.replace('\r\n', '\n').replace('\r', '\n')
 
 
+def _same_text(a: str, b: str) -> bool:
+    """两段文本是否**实质相同** —— 忽略末尾换行的有无。
+
+    本地笔记很常见「最后一行没敲回车」，而远端经过 GitHub 网页编辑器会补上
+    换行。严格比较会把这种无关紧要的差异当成内容改动，进而报出假冲突 ——
+    两边内容明明一样，却要用户二选一。实测可复现，见 gitops.merge_file 的注释。
+    """
+    return a.rstrip('\n') == b.rstrip('\n')
+
+
 def _backup_notes(folder: Path, names: list[str]) -> Path | None:
     """把即将被改写的笔记先复制一份。返回备份目录；失败返回 ``None``。"""
     target = config.BACKUPS_DIR / time.strftime('%Y%m%d-%H%M%S')
@@ -717,9 +727,10 @@ def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan
         # 先看**远端有没有动这篇** —— 它没动，本地改没改都轮不到远端来管。
         # （顺序不能反：两边都没改时若先判 ours == base，会把它错算成
         # 「需要更新」，白写一遍内容还多列一条改动。）
-        if theirs == base:
+        # 比较一律用 _same_text：末尾换行的有无不算改动。
+        if _same_text(theirs, base):
             files.append(PullFile(name, 'skip', '远端没改这篇'))
-        elif ours == base:
+        elif _same_text(ours, base):
             files.append(PullFile(name, 'update', '本地没改过，直接用远端版本'))
             writes[name] = theirs
             original[name] = (enc, eol)
