@@ -507,6 +507,15 @@ def _test_pull_ui(win) -> None:
     texts2 = ' | '.join(w.text() for w in dlg2.findChildren(QLabel))
     check('没有冲突时不出现「有冲突」组', '有冲突' not in texts2, texts2[:140])
 
+    # ── 远端只改了生成物：不能笼统说「已经是最新」 ──
+    check('远端只改生成物有专门的结果种类',
+          pipeline.REASON_ARTIFACTS_ONLY != pipeline.REASON_UP_TO_DATE)
+    plan3 = PullPlan(ok=True, reason=pipeline.REASON_ARTIFACTS_ONLY, behind=1,
+                     remote_rev='origin/main', outside=['X.md'])
+    texts3 = ' | '.join(w.text() for w in PullDialog(plan3, win).findChildren(QLabel))
+    check('确认层会单列「不会同步」的文件', '不会同步' in texts3, texts3[:160])
+    check('并说明会被下次推送覆盖', '下次推送会被覆盖' in texts3, texts3[:200])
+
     # ── 前置分支：都不该启动后台任务 ──
     # 未绑账号那条分支会打开授权对话框（还会真去申请设备码），
     # 所以把入口换成记录器 —— 只验证「有没有被引导过去」。

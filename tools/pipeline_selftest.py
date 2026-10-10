@@ -629,6 +629,33 @@ def test_pull(bare: Path) -> None:
               plan2.ok and plan2.reason == pipeline.REASON_LOCAL_AHEAD,
               f'{plan2.reason} / {plan2.message}')
         check('这种情况下不写任何文件', not plan2.writes)
+
+        # ── 远端只改了自动生成的文件 ──
+        # 真机反馈出来的场景：用户在 GitHub 网页上编辑了 <笔记>.md（生成物），
+        # 本地笔记原文并没有变。这时绝不能说「已经是最新」——用户会觉得软件在骗他。
+        # 先让「另一台电脑」跟上远端（中途主仓库推过一次，它落后了）
+        gitops.git(other, 'fetch', 'origin', 'main')
+        gitops.git(other, 'reset', '--hard', 'origin/main')
+        (other / 'Java八股.md').write_text('# 网页上改的\n',
+                                           encoding='utf-8', newline='\n')
+        gitops.add_all(other)
+        gitops.commit(other, '网页上改了生成文件')
+        gitops.git(other, 'push', 'origin', 'main')
+
+        plan3 = pipeline.plan_pull(group, token='fake-token')
+        check('远端只改生成物时给出专门的原因',
+              plan3.ok and plan3.reason == pipeline.REASON_ARTIFACTS_ONLY,
+              f'{plan3.reason} / {plan3.message}')
+        check('列出那些不同步的路径', plan3.outside == ['Java八股.md'],
+              str(plan3.outside))
+        check('这种情形下本地笔记一律不动', not plan3.writes)
+
+        res3 = pipeline.apply_pull(group, plan3)
+        aligned = gitops.ahead_behind(pipeline.workspace_dir(group), 'main')
+        check('生成物场景下也对齐中转区（否则推送会被「远端领先」拦住）',
+              aligned == (0, 0), str(aligned))
+        check('并且没有改写任何本地笔记', not res3.written and not res3.failed,
+              f'{res3.written} / {res3.failed}')
     finally:
         gitops.ensure_remote = real_ensure
 

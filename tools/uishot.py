@@ -353,7 +353,9 @@ def main() -> int:
                         files=[PullFile('Java八股2.txt', 'update', '本地没改过，直接用远端版本'),
                                PullFile('Redis补充.txt', 'update', '本地没改过，直接用远端版本'),
                                PullFile('agent开发.txt', 'merge', '两边改的位置不重叠，已自动合并'),
-                               PullFile('读书笔记.txt', 'conflict', '1 处两边改到了同一位置')])
+                               PullFile('读书笔记.txt', 'conflict', '1 处两边改到了同一位置')],
+                        outside=['Java八股2.md', 'index.html', 'README.md',
+                                 '_sidebar.md'])
         dlg = PullDialog(plan, win)
         dlg.setModal(False)
         dlg.show()

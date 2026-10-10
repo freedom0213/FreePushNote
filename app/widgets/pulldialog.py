@@ -115,6 +115,11 @@ class PullDialog(QDialog):
         for title_text, items, color, hint in shown:
             inner.addWidget(self._build_group(title_text, items, color, hint))
 
+        # 远端改了、但不打算同步的东西（自动生成的站点文件）。
+        # 不说清楚，用户会以为「Pull 成功了，网页上的修改应该生效了」。
+        if plan.outside:
+            inner.addWidget(self._build_outside(plan.outside))
+
         # ── 备份说明 ──
         note = QFrame()
         note.setObjectName('NoteInfo')
@@ -181,6 +186,27 @@ class PullDialog(QDialog):
             row.addWidget(name)
             row.addStretch(1)
             b_lay.addLayout(row)
+        return box
+
+    def _build_outside(self, paths: list[str]) -> QFrame:
+        """远端改了、但不会被同步的路径（自动生成的站点文件）。"""
+        box = QFrame()
+        box.setObjectName('NoteWarn')
+        b_lay = QVBoxLayout(box)
+        b_lay.setContentsMargins(12, 10, 12, 10)
+        b_lay.setSpacing(4)
+        b_lay.addWidget(_label(f'不会同步（{len(paths)} 个自动生成的文件）',
+                               theme.WARNING, theme.FS_TINY, 600))
+        b_lay.addWidget(_label(
+            '这些文件由笔记原文生成，每次推送都会重新生成；'
+            '在网页上直接改它们，下次推送会被覆盖。',
+            theme.TEXT_SECOND, theme.FS_LABEL))
+        for p in paths[:6]:
+            b_lay.addWidget(_label(f'· {p}', theme.TEXT_FAINT, theme.FS_LABEL,
+                                   mono=True))
+        if len(paths) > 6:
+            b_lay.addWidget(_label(f'· 等共 {len(paths)} 个', theme.TEXT_FAINT,
+                                   theme.FS_LABEL))
         return box
 
     # ───────────────────────── 交互 ─────────────────────────

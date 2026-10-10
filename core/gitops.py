@@ -501,6 +501,20 @@ def merge_base(path: str | Path, a: str, b: str) -> str:
     return stdout_of(git(path, 'merge-base', a, b, check=False))
 
 
+def diff_names(path: str | Path, rev_range: str) -> list[str]:
+    """某个提交区间（如 ``HEAD..origin/main``）里改动过的文件路径。
+
+    用来回答一个 Pull 绕不开的问题：**远端这次到底改了什么** ——
+    如果改的全是自动生成的站点文件，那本地笔记原文根本不需要同步，
+    但用户必须被告知，否则他会以为「Pull 成功了，仓库里的改动应该已经生效」。
+    """
+    proc = git(path, '-c', 'core.quotepath=false',
+               'diff', '--name-only', rev_range, check=False)
+    if proc.returncode != 0:
+        return []
+    return [l for l in stdout_of(proc).splitlines() if l.strip()]
+
+
 def show_file(path: str | Path, rev: str, rel: str) -> str | None:
     """从对象库取某个文件在某次提交里的内容；该修订里没有这个文件则返回 ``None``。
 

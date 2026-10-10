@@ -47,6 +47,7 @@ REASON_UP_TO_DATE = 'up_to_date'      # 远端没有新东西
 REASON_LOCAL_AHEAD = 'local_ahead'    # 本地有还没推出去的提交
 REASON_FETCH_FAILED = 'fetch_failed'  # 读不到远端（网络 / 授权）
 REASON_CONFLICT = 'conflict'          # 有文件两边都改了同一处
+REASON_ARTIFACTS_ONLY = 'artifacts_only'  # 远端的新提交只动了自动生成的站点文件
 
 
 @dataclass
@@ -546,6 +547,9 @@ class PullPlan:
     writes: dict[str, str] = field(default_factory=dict)
     #: 笔记名 → (编码, 换行)，写回时按它还原
     original: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: 远端新提交里、**不属于**本次同步范围的路径（自动生成的站点文件等）。
+    #: 这些不会被拉回本地，也不该被拉回 —— 但必须让用户知道它们的存在。
+    outside: list[str] = field(default_factory=list)
 
     @property
     def updated(self) -> list[PullFile]:
@@ -688,6 +692,14 @@ def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan
     writes: dict[str, str] = {}
     original: dict[str, tuple[str, str]] = {}
 
+    # 远端这段时间改过的所有路径。**这一步是为了把「改了但不同步的东西」说出来** ——
+    # 典型场景：用户在 GitHub 网页上直接编辑了自动生成的站点页面（<笔记>.md）。
+    # 那个文件每次推送都会按笔记原文重新生成，网页上的改动迟早被覆盖；
+    # 如果这里不提，用户只会看到「Pull 成功」而本地毫无变化，然后彻底懵掉。
+    changed = gitops.diff_names(ws, f'{base_rev}..{remote_rev}')
+    picked_set = set(picked)
+    outside = [p for p in changed if p not in picked_set]
+
     for name in picked:
         src = folder / name
         theirs_raw = gitops.show_file(ws, remote_rev, name)
@@ -702,12 +714,15 @@ def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan
         theirs = _normalize_newlines(theirs_raw)
         base = _normalize_newlines(gitops.show_file(ws, base_rev, name) or '')
 
-        if ours == base:
+        # 先看**远端有没有动这篇** —— 它没动，本地改没改都轮不到远端来管。
+        # （顺序不能反：两边都没改时若先判 ours == base，会把它错算成
+        # 「需要更新」，白写一遍内容还多列一条改动。）
+        if theirs == base:
+            files.append(PullFile(name, 'skip', '远端没改这篇'))
+        elif ours == base:
             files.append(PullFile(name, 'update', '本地没改过，直接用远端版本'))
             writes[name] = theirs
             original[name] = (enc, eol)
-        elif theirs == base:
-            files.append(PullFile(name, 'skip', '远端没改这篇'))
         else:
             merged, conflicts = gitops.merge_file(base, ours, theirs)
             if conflicts:
@@ -719,14 +734,21 @@ def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan
                 original[name] = (enc, eol)
 
     if not writes and not any(f.action == 'conflict' for f in files):
+        if outside:
+            # 远端确实有提交，但改的都不是笔记原文 —— 说白了：改的是成果物。
+            # 不能用「已经是最新」这种说法糊过去，用户会觉得软件在骗他。
+            return PullPlan(ok=True, reason=REASON_ARTIFACTS_ONLY,
+                            ahead=ahead, behind=behind,
+                            remote_rev=remote_rev, files=files, outside=outside,
+                            message='远端的新提交只改了自动生成的文件。')
         return PullPlan(ok=True, reason=REASON_UP_TO_DATE, ahead=ahead, behind=behind,
                         remote_rev=remote_rev, files=files,
-                        message='远端有新提交，但你纳管的这些笔记内容没有变化。')
+                        message='远端没有新的内容。')
 
     reason = REASON_CONFLICT if any(f.action == 'conflict' for f in files) else REASON_OK
     return PullPlan(ok=True, reason=reason, ahead=ahead, behind=behind,
                     base_rev=base_rev, remote_rev=remote_rev,
-                    files=files, writes=writes, original=original)
+                    files=files, writes=writes, original=original, outside=outside)
 
 
 def apply_pull(group: dict, plan: PullPlan, *, on_log=None) -> PullResult:

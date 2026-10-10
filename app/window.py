@@ -1091,10 +1091,29 @@ class FreePushWindow(QWidget):
                    kind='error' if failed else 'warning')
             return
         if plan.reason == pipeline.REASON_UP_TO_DATE:
-            notice(self, '已经是最新', plan.message, kind='success')
+            notice(self, '远端没有新内容', plan.message, kind='success')
             return
         if plan.reason == pipeline.REASON_LOCAL_AHEAD:
             notice(self, '本地有还没推上去的改动', plan.message, kind='warning')
+            return
+        if plan.reason == pipeline.REASON_ARTIFACTS_ONLY:
+            # 远端确实有新提交，但改的全是自动生成的站点文件。
+            # 两件事都要做：① 让用户看懂为什么本地没变化；② 仍然对齐中转区，
+            # 否则推送会被「远端领先」拦住，用户就卡在来回提示里出不来。
+            group = self._pull_group or self._current_group()
+            if group:
+                pipeline.apply_pull(group, plan, on_log=self._push_log)
+            self._refresh_all()
+            lines = '\n'.join(f'· {p}' for p in plan.outside[:8])
+            notice(self, '远端只改了自动生成的文件',
+                   f'远端有 {plan.behind} 个新提交，但它们改的是这些自动生成的文件：\n\n'
+                   f'{lines}\n\n'
+                   f'你的笔记原文（{"、".join(core_config.managed_names(group))}）'
+                   f'没有变化，所以本地不需要写回。\n\n'
+                   f'这些生成文件每次推送都会按笔记原文重新生成 —— '
+                   f'换句话说，在 GitHub 网页上对它们的修改，'
+                   f'会在你下次推送时被覆盖。要改内容，请改 .txt 原文。',
+                   kind='warning')
             return
 
         group = self._pull_group or self._current_group() or {}
