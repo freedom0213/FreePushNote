@@ -483,6 +483,156 @@ def test_bare_guard() -> None:
     check('工作区内部可以正常清空', not (ws / 'junk.txt').exists())
 
 
+def test_pull(bare: Path) -> None:
+    """[5] 拉取：远端领先 / 自动合并 / 冲突保护 / 编码保持 / 中转区追平。
+
+    用第二个 bare 仓库当远端，并 clone 出「另一台电脑」来制造真实的远端提交 ——
+    比对、合并、落盘全是真 git 操作，不联网。
+    """
+    print('\n[5] 拉取（Pull）')
+
+    folder = _TMP / '拉取测试'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / '未改.txt').write_text('第一行\n第二行\n第三行\n',
+                                     encoding='utf-8', newline='\n')
+    (folder / '两边不同处.txt').write_text('A1\nA2\nA3\nA4\nA5\n',
+                                          encoding='utf-8', newline='\n')
+    (folder / '同一处.txt').write_text('B1\nB2\nB3\n',
+                                       encoding='utf-8', newline='\n')
+    # GBK + CRLF：验证「写回保持原样」这条铁律
+    (folder / 'GBK笔记.txt').write_bytes('编码一\r\n编码二\r\n'.encode('gbk'))
+
+    group = config.new_group(folder)
+    group['id'] = 'pulltest'
+    group['repo'] = 'someone/pull-demo'
+    group['branch'] = 'main'
+    group['site'] = False
+    group['files'] = ['未改.txt', '两边不同处.txt', '同一处.txt', 'GBK笔记.txt']
+
+    def local_remote(path, repo, on_log=None):
+        url = bare.as_uri()
+        if gitops.remote_url(path) != url:
+            gitops.git(path, 'remote', 'remove', 'origin', check=False)
+            gitops.git(path, 'remote', 'add', 'origin', url)
+        return url
+
+    real_ensure = gitops.ensure_remote
+    gitops.ensure_remote = local_remote
+    try:
+        # ── 基线：先推一次，让远端 == 本地 == 共同祖先 ──
+        base = pipeline.push_group(group, message='基线', token='fake-token',
+                                   retries=1)
+        check('拉取前置：基线推送成功', base.ok, f'{base.reason} / {base.detail}')
+
+        # ── 「另一台电脑」在远端做改动 ──
+        other = _TMP / '另一台电脑'
+        gitops.git(_TMP, 'clone', bare.as_uri(), str(other))
+        gitops.git(other, 'config', 'user.name', 'other')
+        gitops.git(other, 'config', 'user.email', 'other@example.com')
+        (other / '未改.txt').write_text('第一行\n第二行\n第三行\n远端新加的一行\n',
+                                        encoding='utf-8', newline='\n')
+        (other / '两边不同处.txt').write_text('A1-远端改\nA2\nA3\nA4\nA5\n',
+                                             encoding='utf-8', newline='\n')
+        (other / '同一处.txt').write_text('B1\nB2-远端改\nB3\n',
+                                          encoding='utf-8', newline='\n')
+        (other / 'GBK笔记.txt').write_text('编码一\n编码二\n远端追加\n',
+                                           encoding='utf-8', newline='\n')
+        gitops.add_all(other)
+        gitops.commit(other, '另一台电脑的改动')
+        gitops.git(other, 'push', 'origin', 'main')
+
+        # ── 本地改动：一处与远端错开、一处正撞上 ──
+        (folder / '两边不同处.txt').write_text('A1\nA2\nA3\nA4\nA5-本地改\n',
+                                              encoding='utf-8', newline='\n')
+        (folder / '同一处.txt').write_text('B1\nB2-本地改\nB3\n',
+                                           encoding='utf-8', newline='\n')
+
+        # ── 计划（只算不写）──
+        plan = pipeline.plan_pull(group, token='fake-token')
+        check('分析成功', plan.ok, f'{plan.reason} / {plan.detail}')
+        check('识别出落后远端', plan.behind >= 1, f'behind={plan.behind}')
+        check('本地未改的 → 直接更新',
+              {f.name for f in plan.updated} == {'未改.txt', 'GBK笔记.txt'},
+              str([(f.name, f.action) for f in plan.files]))
+        check('两边错开改的 → 自动合并',
+              {f.name for f in plan.merged} == {'两边不同处.txt'},
+              str([(f.name, f.action) for f in plan.files]))
+        check('同一处相撞 → 冲突',
+              {f.name for f in plan.conflicts} == {'同一处.txt'},
+              str([(f.name, f.action) for f in plan.files]))
+        check('计划阶段没有动任何文件',
+              'A5-本地改' in (folder / '两边不同处.txt').read_text(encoding='utf-8')
+              and 'B2-本地改' in (folder / '同一处.txt').read_text(encoding='utf-8'))
+
+        # ── 执行 ──
+        result = pipeline.apply_pull(group, plan)
+        check('执行成功', result.ok, f'{result.reason} / {result.message}')
+        # written 含「直接覆盖」和「自动合并」两类 —— 两者都要落盘
+        check('写回了三篇（2 篇覆盖 + 1 篇合并结果）',
+              set(result.written) == {'未改.txt', 'GBK笔记.txt', '两边不同处.txt'},
+              str(sorted(result.written)))
+        check('合并结果也记在 merged 里', result.merged == ['两边不同处.txt'],
+              str(result.merged))
+
+        text_untouched = (folder / '未改.txt').read_text(encoding='utf-8')
+        check('本地未改的拿到了远端内容', '远端新加的一行' in text_untouched,
+              text_untouched.replace('\n', '|'))
+
+        merged_text = (folder / '两边不同处.txt').read_text(encoding='utf-8')
+        check('自动合并保留了远端的改动', 'A1-远端改' in merged_text,
+              merged_text.replace('\n', '|'))
+        check('自动合并也保留了本地的改动', 'A5-本地改' in merged_text,
+              merged_text.replace('\n', '|'))
+
+        conflict_text = (folder / '同一处.txt').read_text(encoding='utf-8')
+        check('冲突的那篇保持本地版本不动', 'B2-本地改' in conflict_text,
+              conflict_text.replace('\n', '|'))
+        check('冲突没有写进远端版本', 'B2-远端改' not in conflict_text)
+        check('结果里列出了冲突篇目', result.conflicts == ['同一处.txt'],
+              str(result.conflicts))
+
+        # ── 编码与换行必须原样保留 ──
+        raw = (folder / 'GBK笔记.txt').read_bytes()
+        check('写回后仍是 GBK 编码（不是 UTF-8）',
+              raw.decode('gbk').find('远端追加') >= 0, str(raw[:40]))
+        check('写回后仍是 CRLF 换行', b'\r\n' in raw, str(raw[:60]))
+
+        # ── 备份 ──
+        check('写回前做了备份', result.backup_dir is not None
+              and result.backup_dir.is_dir(), str(result.backup_dir))
+        if result.backup_dir:
+            backed = result.backup_dir / '未改.txt'
+            check('备份里存的是被覆盖前的内容',
+                  backed.is_file()
+                  and '远端新加的一行' not in backed.read_text(encoding='utf-8'),
+                  str(result.backup_dir))
+
+        # ── 中转区追平远端：下一次推送必须是快进 ──
+        ws = pipeline.workspace_dir(group)
+        ahead, behind = gitops.ahead_behind(ws, 'main')
+        check('中转区已与远端对齐', (ahead, behind) == (0, 0), f'{ahead}/{behind}')
+
+        (folder / '未改.txt').write_text(text_untouched + '再补一行\n',
+                                        encoding='utf-8', newline='\n')
+        after = pipeline.push_group(group, message='拉取后的推送', token='fake-token',
+                                    retries=1)
+        check('拉取之后的推送能成功（不存在非快进拒绝）', after.ok,
+              f'{after.reason} / {after.detail}')
+
+        # ── 本地领先：中转区有未推送的提交（例如上次推送失败的残留）──
+        (folder / '同一处.txt').write_text('B1\nB2-本地改\nB3\n本地又改一行\n',
+                                           encoding='utf-8', newline='\n')
+        pipeline.stage_group(group, account={'login': 'tester', 'id': 1})
+        gitops.commit(pipeline.workspace_dir(group), '本地提交但没推出去')
+        plan2 = pipeline.plan_pull(group, token='fake-token')
+        check('远端无更新时提示「本地有未推送的改动」',
+              plan2.ok and plan2.reason == pipeline.REASON_LOCAL_AHEAD,
+              f'{plan2.reason} / {plan2.message}')
+        check('这种情况下不写任何文件', not plan2.writes)
+    finally:
+        gitops.ensure_remote = real_ensure
+
+
 def main() -> int:
     print('=' * 66)
     print('FreePushNote 推送链路自测（本地 bare 仓库，不联网）')
@@ -500,6 +650,12 @@ def main() -> int:
     assert subprocess_init.returncode == 0, subprocess_init
     test_full_push(folder, bare)
     test_bare_guard()
+
+    bare_pull = _TMP / 'remote_pull.git'
+    bare_pull.mkdir(parents=True, exist_ok=True)
+    init_pull = gitops.git(bare_pull, 'init', '--bare', '-b', 'main', check=False)
+    assert init_pull.returncode == 0, init_pull
+    test_pull(bare_pull)
 
     print('\n' + '=' * 66)
     print(f'通过 {PASS} / {PASS + FAIL}')

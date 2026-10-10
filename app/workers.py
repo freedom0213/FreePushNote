@@ -70,6 +70,70 @@ class PushWorker(QThread):
         self.done.emit(result)
 
 
+class RemoteCheckWorker(QThread):
+    """推送前检查远端有没有领先（fetch + 计数，不动文件）。"""
+
+    done = Signal(object)      # {'ok','ahead','behind','message'}
+
+    def __init__(self, group: dict, *, token: str, on_log=None) -> None:
+        super().__init__()
+        self._group = group
+        self._token = token
+        self._on_log = on_log
+
+    def run(self) -> None:  # noqa: D102
+        try:
+            info = pipeline.check_remote(self._group, token=self._token,
+                                         on_log=self._on_log)
+        except Exception as exc:  # noqa: BLE001 - 兜底：绝不让异常把线程带崩
+            info = {'ok': False, 'ahead': 0, 'behind': 0, 'message': repr(exc)}
+        self.done.emit(info)
+
+
+class PullPlanWorker(QThread):
+    """分析一次拉取（只算不写，见 :func:`core.pipeline.plan_pull`）。"""
+
+    done = Signal(object)      # pipeline.PullPlan
+
+    def __init__(self, group: dict, *, token: str, on_log=None) -> None:
+        super().__init__()
+        self._group = group
+        self._token = token
+        self._on_log = on_log
+
+    def run(self) -> None:  # noqa: D102
+        try:
+            plan = pipeline.plan_pull(self._group, token=self._token,
+                                      on_log=self._on_log)
+        except Exception as exc:  # noqa: BLE001
+            plan = pipeline.PullPlan(
+                reason=pipeline.REASON_GIT_ERROR,
+                message='分析远端改动时出错了。', detail=repr(exc))
+        self.done.emit(plan)
+
+
+class ApplyPullWorker(QThread):
+    """执行拉取计划：备份 → 写回笔记 → 中转区追平远端。"""
+
+    done = Signal(object)      # pipeline.PullResult
+
+    def __init__(self, group: dict, plan, on_log=None) -> None:
+        super().__init__()
+        self._group = group
+        self._plan = plan
+        self._on_log = on_log
+
+    def run(self) -> None:  # noqa: D102
+        try:
+            result = pipeline.apply_pull(self._group, self._plan,
+                                         on_log=self._on_log)
+        except Exception as exc:  # noqa: BLE001
+            result = pipeline.PullResult(
+                reason=pipeline.REASON_GIT_ERROR,
+                message='拉取过程中出现了意外错误。', detail=repr(exc))
+        self.done.emit(result)
+
+
 def start_worker(worker: QThread) -> QThread:
     """启动并持有引用（调用方不必自己管 GC）。"""
     _LIVE.add(worker)

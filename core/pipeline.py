@@ -30,10 +30,11 @@ from __future__ import annotations
 
 import difflib
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config, convert, gitops, site
+from . import config, convert, gitops, site, textio
 
 #: 推送结果的种类。界面按种类给不同文案 —— 不共用一句「推送失败」
 REASON_OK = 'ok'
@@ -42,6 +43,10 @@ REASON_NO_CHANGES = 'no_changes'      # 本地与远端一致
 REASON_NO_REMOTE = 'no_remote'        # 没配远程仓库
 REASON_GIT_ERROR = 'git_error'        # init / commit 阶段出错
 REASON_PUSH_FAILED = 'push_failed'    # 网络 / 授权 / 冲突
+REASON_UP_TO_DATE = 'up_to_date'      # 远端没有新东西
+REASON_LOCAL_AHEAD = 'local_ahead'    # 本地有还没推出去的提交
+REASON_FETCH_FAILED = 'fetch_failed'  # 读不到远端（网络 / 授权）
+REASON_CONFLICT = 'conflict'          # 有文件两边都改了同一处
 
 
 @dataclass
@@ -493,3 +498,300 @@ def diff_preview(group: dict, *, names: list[str] | None = None) -> list[dict]:
         out.append({'name': name, 'added': added, 'removed': removed,
                     'text': '\n'.join(lines)})
     return out
+
+
+# ─────────────────────────── 拉取（Pull） ───────────────────────────
+#
+# 与推送同构地分两阶段：
+#
+#     plan_pull()   读远端 → 判 ahead/behind → 定 base → 逐篇比对 / 试合并
+#                   **只算不写**，把「会更新几篇、哪篇会冲突」先拿给用户看
+#     apply_pull()  备份 → 按原编码写回笔记 → 中转区追平远端
+#
+# 三条不可动摇的规则：
+#
+#   1. 本地**没改过**的文件才直接覆盖；改过的走三方合并（各改各的能自动合掉）；
+#      两边改到同一处则**不写**，把选择权交回用户
+#   2. 写回一律保持该文件**原本的编码与换行符** —— 不能让一篇 GBK+CRLF 的
+#      笔记被悄悄改成 UTF-8+LF，别的工具会因此认不出来
+#   3. 写回前先备份到 ``~/.pushnote/backups/``；备份失败就**不动文件**
+
+#: 备份保留份数。备份是保险，不是归档。
+BACKUP_KEEP = 5
+
+
+@dataclass
+class PullFile:
+    """一篇笔记在本次拉取里的处置。``action``: update | merge | conflict | skip"""
+
+    name: str
+    action: str
+    note: str = ''
+
+
+@dataclass
+class PullPlan:
+    """拉取计划（只算不写）。``writes`` 里的内容在 :func:`apply_pull` 才落盘。"""
+
+    ok: bool = False
+    reason: str = REASON_GIT_ERROR
+    message: str = ''
+    detail: str = ''
+    ahead: int = 0
+    behind: int = 0
+    base_rev: str = ''
+    remote_rev: str = ''
+    files: list[PullFile] = field(default_factory=list)
+    #: 笔记名 → 归一化后的新正文（UTF-8 / LF）
+    writes: dict[str, str] = field(default_factory=dict)
+    #: 笔记名 → (编码, 换行)，写回时按它还原
+    original: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    @property
+    def updated(self) -> list[PullFile]:
+        return [f for f in self.files if f.action == 'update']
+
+    @property
+    def merged(self) -> list[PullFile]:
+        return [f for f in self.files if f.action == 'merge']
+
+    @property
+    def conflicts(self) -> list[PullFile]:
+        return [f for f in self.files if f.action == 'conflict']
+
+    @property
+    def has_work(self) -> bool:
+        return bool(self.writes) or bool(self.conflicts)
+
+
+@dataclass
+class PullResult:
+    ok: bool = False
+    reason: str = REASON_GIT_ERROR
+    message: str = ''
+    detail: str = ''
+    written: list[str] = field(default_factory=list)
+    merged: list[str] = field(default_factory=list)
+    conflicts: list[str] = field(default_factory=list)
+    failed: dict[str, str] = field(default_factory=dict)
+    backup_dir: Path | None = None
+
+
+def _normalize_newlines(text: str) -> str:
+    return text.replace('\r\n', '\n').replace('\r', '\n')
+
+
+def _backup_notes(folder: Path, names: list[str]) -> Path | None:
+    """把即将被改写的笔记先复制一份。返回备份目录；失败返回 ``None``。"""
+    target = config.BACKUPS_DIR / time.strftime('%Y%m%d-%H%M%S')
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            src = folder / name
+            if src.is_file():
+                shutil.copy2(src, target / name)
+    except OSError:
+        return None
+    _prune_backups()
+    return target
+
+
+def _prune_backups(keep: int = BACKUP_KEEP) -> None:
+    """只留最近 ``keep`` 次备份。删的是我们自己在 ``~/.pushnote`` 下建的目录。"""
+    root = config.BACKUPS_DIR
+    if not root.is_dir():
+        return
+    dirs = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
+    for old in dirs[:-keep]:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def check_remote(group: dict, *, token: str | None = None, on_log=None) -> dict:
+    """推送前看一眼：远端有没有我们这个分支上没有的提交。
+
+    只 ``fetch`` + 比较计数，**不动任何文件**。返回 ``{'ok','ahead','behind','message'}``。
+
+    ``ok=False`` 表示「没检查成」（没网 / 没授权），不是「远端有新东西」——
+    调用方**不要**因此拦住推送：真正的失败留给 push 那一步去报，
+    检查失败就拦人，等于断网时连推送都不让试，那是帮倒忙。
+    """
+    log = on_log or (lambda *_a, **_k: None)
+    if not group.get('repo'):
+        return {'ok': False, 'ahead': 0, 'behind': 0,
+                'message': '还没有关联 GitHub 仓库。'}
+    if not token:
+        return {'ok': False, 'ahead': 0, 'behind': 0,
+                'message': '还没有绑定 GitHub 账号。'}
+
+    try:
+        ws = prepare_workspace(group, on_log=log)
+    except (gitops.GitError, OSError) as exc:
+        return {'ok': False, 'ahead': 0, 'behind': 0, 'message': str(exc)}
+
+    branch = str(group.get('branch') or 'main')
+    if not gitops.fetch(ws, branch, token=token, on_log=log):
+        return {'ok': False, 'ahead': 0, 'behind': 0,
+                'message': '连不上 GitHub，没能确认远端状态。'}
+
+    ahead, behind = gitops.ahead_behind(ws, branch)
+    log(f'远端状态：本地领先 {ahead}，落后 {behind}')
+    return {'ok': True, 'ahead': ahead, 'behind': behind, 'message': ''}
+
+
+def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan:
+    """分析一次拉取：谁会更新、谁要合并、谁冲突。**不改任何文件。**"""
+    log = on_log or (lambda *_a, **_k: None)
+    picked = config.managed_names(group)
+    if not picked:
+        return PullPlan(reason=REASON_NO_FILES,
+                        message='这个分组里还没有纳入管理的文件。')
+    if not group.get('repo'):
+        return PullPlan(reason=REASON_NO_REMOTE, message='还没有关联 GitHub 仓库。')
+    if not token:
+        return PullPlan(reason=REASON_NO_REMOTE,
+                        message='还没有绑定 GitHub 账号，无法拉取。')
+
+    try:
+        ws = prepare_workspace(group, on_log=log)
+    except (gitops.GitError, OSError) as exc:
+        return PullPlan(reason=REASON_GIT_ERROR, message='准备工作区失败。',
+                        detail=str(exc))
+
+    branch = str(group.get('branch') or 'main')
+    if not gitops.fetch(ws, branch, token=token, on_log=log):
+        return PullPlan(reason=REASON_FETCH_FAILED,
+                        message='连不上 GitHub，读不到远端内容。',
+                        detail='检查网络，或确认代理软件正在运行。')
+
+    ahead, behind = gitops.ahead_behind(ws, branch)
+    log(f'与远端比较：本地领先 {ahead} 个提交，落后 {behind} 个提交')
+
+    if behind == 0:
+        if ahead == 0:
+            return PullPlan(ok=True, reason=REASON_UP_TO_DATE, ahead=ahead, behind=behind,
+                            message='远端没有新的内容。')
+        return PullPlan(ok=True, reason=REASON_LOCAL_AHEAD, ahead=ahead, behind=behind,
+                        message='远端没有新内容，但本地有还没推上去的改动。\n'
+                                '先推送这些改动，拉取才有意义。')
+
+    remote_rev = f'origin/{branch}'
+    if ahead == 0:
+        base_rev = 'HEAD'
+    else:
+        # 分叉：共同祖先不是 HEAD。若拿 HEAD 当 base，远端已有的改动会被
+        # 误算成「本地新增」，合并结果直接是错的。
+        base_rev = gitops.merge_base(ws, 'HEAD', remote_rev) or 'HEAD'
+        log(f'检测到分叉（本地领先 {ahead} 个提交），共同祖先 {base_rev[:8]}')
+
+    folder = Path(str(group.get('folder') or ''))
+    files: list[PullFile] = []
+    writes: dict[str, str] = {}
+    original: dict[str, tuple[str, str]] = {}
+
+    for name in picked:
+        src = folder / name
+        theirs_raw = gitops.show_file(ws, remote_rev, name)
+        if theirs_raw is None:
+            files.append(PullFile(name, 'skip', '远端还没有这篇'))
+            continue
+        if not src.is_file():
+            files.append(PullFile(name, 'skip', '本地找不到这个文件'))
+            continue
+
+        ours, enc, eol = textio.read_text(src)          # 换行已归一成 \n
+        theirs = _normalize_newlines(theirs_raw)
+        base = _normalize_newlines(gitops.show_file(ws, base_rev, name) or '')
+
+        if ours == base:
+            files.append(PullFile(name, 'update', '本地没改过，直接用远端版本'))
+            writes[name] = theirs
+            original[name] = (enc, eol)
+        elif theirs == base:
+            files.append(PullFile(name, 'skip', '远端没改这篇'))
+        else:
+            merged, conflicts = gitops.merge_file(base, ours, theirs)
+            if conflicts:
+                files.append(PullFile(name, 'conflict',
+                                      f'{conflicts} 处两边改到了同一位置'))
+            else:
+                files.append(PullFile(name, 'merge', '两边改的位置不重叠，已自动合并'))
+                writes[name] = merged
+                original[name] = (enc, eol)
+
+    if not writes and not any(f.action == 'conflict' for f in files):
+        return PullPlan(ok=True, reason=REASON_UP_TO_DATE, ahead=ahead, behind=behind,
+                        remote_rev=remote_rev, files=files,
+                        message='远端有新提交，但你纳管的这些笔记内容没有变化。')
+
+    reason = REASON_CONFLICT if any(f.action == 'conflict' for f in files) else REASON_OK
+    return PullPlan(ok=True, reason=reason, ahead=ahead, behind=behind,
+                    base_rev=base_rev, remote_rev=remote_rev,
+                    files=files, writes=writes, original=original)
+
+
+def apply_pull(group: dict, plan: PullPlan, *, on_log=None) -> PullResult:
+    """执行计划：备份 → 按原编码写回笔记 → 中转区追平远端。"""
+    log = on_log or (lambda *_a, **_k: None)
+    if not plan.ok:
+        return PullResult(reason=plan.reason, message=plan.message, detail=plan.detail)
+
+    result = PullResult(ok=True, reason=plan.reason,
+                        conflicts=[f.name for f in plan.conflicts],
+                        merged=[f.name for f in plan.merged])
+    names = sorted(plan.writes)
+
+    if not names:
+        _align_workspace(group, plan.remote_rev, log)
+        result.message = plan.message or '没有需要写回本地的内容。'
+        return result
+
+    folder = Path(str(group.get('folder') or ''))
+    backup = _backup_notes(folder, names)
+    if backup is None:
+        # 宁可什么都不做，也不在没备份的情况下覆盖用户的笔记
+        log('!! 备份失败，已中止写回')
+        return PullResult(reason=REASON_GIT_ERROR,
+                          message='备份没做成，为安全起见没有改写你的笔记。',
+                          detail=f'确认这个目录可写：{config.BACKUPS_DIR}')
+    result.backup_dir = backup
+    log(f'已备份 {len(names)} 篇到 {backup}')
+
+    for name in names:
+        enc, eol = plan.original.get(name, ('utf-8', 'crlf'))
+        try:
+            textio.write_text(folder / name, plan.writes[name],
+                              encoding=enc, eol=eol)
+        except OSError as exc:
+            result.failed[name] = str(exc)
+            log(f'!! 写回 {name} 失败：{exc}')
+        else:
+            result.written.append(name)
+            log(f'已更新 {name}')
+
+    _align_workspace(group, plan.remote_rev, log)
+
+    if result.failed:
+        result.ok = False
+        result.reason = REASON_GIT_ERROR
+        result.message = f'有 {len(result.failed)} 篇没能写回。'
+    else:
+        result.message = f'已更新 {len(result.written)} 篇笔记。'
+        if result.conflicts:
+            result.message += f'\n有 {len(result.conflicts)} 篇两边改到了同一处，已保留你的版本。'
+    return result
+
+
+def _align_workspace(group: dict, remote_rev: str, log) -> None:
+    """让中转区追平远端，使下一次推送是快进。
+
+    中转区的工作树是临时镜像（每次推送前整块重建），``reset --hard`` 丢弃它
+    是安全的；**用户的笔记文件不受影响**。
+    """
+    if not remote_rev:
+        return
+    try:
+        ws = prepare_workspace(group)
+        gitops.reset_hard(ws, remote_rev)
+        log(f'中转区已对齐远端（{remote_rev}）')
+    except (gitops.GitError, OSError) as exc:
+        log(f'!! 中转区对齐失败（不影响本地笔记）：{exc}')

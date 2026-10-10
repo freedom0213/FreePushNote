@@ -53,8 +53,10 @@ from .widgets.editor import CodeEditor
 from .widgets.findbar import FindBar
 from .widgets.managedialog import ManageFolderDialog
 from .widgets.notice import ask, notice
+from .widgets.pulldialog import PullDialog
 from .widgets.pushdialog import PushDialog
-from .workers import PushWorker, StageWorker, start_worker
+from .workers import (ApplyPullWorker, PullPlanWorker, PushWorker,
+                      RemoteCheckWorker, StageWorker, start_worker)
 from .widgets.panel import PanelRail, PushPanel
 from .widgets.sidebar import Sidebar, SidebarRail
 from .widgets.statusbar import StatusBar
@@ -188,8 +190,11 @@ class FreePushWindow(QWidget):
         # 推送过程的输出。界面上不展示（用户不关心 git 命令），
         # 但失败时放进「详细信息」里，排查问题全靠它。
         self._push_log_lines: list[str] = []
-        # 这次推送对应的分组（整理在后台线程里跑，确认层要用回同一个分组）
+        # 这次推送 / 拉取对应的分组（整理在后台线程里跑，确认层要用回同一个分组）
         self._push_group: dict | None = None
+        self._pull_group: dict | None = None
+        #: 当前忙的是什么：'push' | 'pull' | None —— 界面文案要跟着变
+        self._busy_kind: str | None = None
 
         # Windows 无边框窗口的「点任务栏最小化」只允许修一次（见 showEvent）
         self._taskbar_fixed = False
@@ -544,7 +549,8 @@ class FreePushWindow(QWidget):
             return
 
         if self._push_busy:
-            self._apply_sync('running', push='running')
+            self._apply_sync('running', push='running',
+                             text='正在拉取…' if self._busy_kind == 'pull' else None)
             return
 
         if not managed:
@@ -835,17 +841,55 @@ class FreePushWindow(QWidget):
         return dlg.group
 
     def do_push(self, group: dict) -> None:
-        """先本地整理并让用户确认（这一阶段不联网），确认之后才真的推。
+        """推送分三步走：**先看远端** → 本地整理 → 用户确认 → 提交并推送。
 
-        整理也要后台跑：它要起十来个 git 进程、读写成堆文件，放在界面线程上
-        就是「点了 Push 之后整窗僵住两三秒」。用户只会以为软件卡死了。
+        第一步（检查远端）是这一版新加的：如果远端已经有本地没有的提交，
+        直接推会被 GitHub 以「非快进」拒绝 —— 那个报错对写笔记的人来说
+        完全读不懂。不如提前发现，把用户引到「先拉取」这条正确的路上。
+
+        后两步都要后台跑：整理要起十来个 git 进程、读写成堆文件，
+        放在界面线程上就是「点了 Push 之后整窗僵住两三秒」。
         """
         if self._push_busy:
             return
         self._push_log_lines = []
         self._push_busy = True
-        self._push_group = group          # 整理是异步的，确认层要用回同一个分组
+        self._busy_kind = 'push'
+        self._push_group = group          # 异步链路要一路用回同一个分组
         self._refresh_sync()
+        self.panel.set_progress('checking')
+        token = self._account.token if self._account else ''
+        worker = RemoteCheckWorker(group, token=token, on_log=self._push_log)
+        worker.done.connect(self._on_remote_checked)
+        start_worker(worker)
+
+    def _on_remote_checked(self, info: dict) -> None:
+        """远端看完了：远端领先就先拉取，否则继续整理。
+
+        检查失败（``info['ok']`` 为假，例如没网）**不拦人** —— 那只是没查成，
+        不是「远端有新东西」；真正的失败留给 push 那一步去报。
+        """
+        group = self._push_group
+        if not group:
+            self._push_busy = False
+            self._busy_kind = None
+            self.panel.set_progress(None)
+            return
+
+        behind = int(info.get('behind', 0) or 0)
+        if info.get('ok') and behind > 0:
+            self._push_busy = False
+            self._busy_kind = None
+            self.panel.set_progress(None)
+            self._refresh_all()
+            if ask(self, '远端有新的改动',
+                   f'GitHub 上已经有 {behind} 个提交是本地没有的。\n\n'
+                   '直接推送会被 GitHub 拒绝 —— 它不允许覆盖别处的改动。'
+                   '先把远端的内容拉下来，再推送。',
+                   ok_text='现在拉取', cancel_text='稍后再说', kind='warning'):
+                self.on_pull()
+            return
+
         self.panel.set_progress('preparing')
         worker = StageWorker(group, account=account_mod.info(),
                              on_log=self._push_log)
@@ -993,17 +1037,120 @@ class FreePushWindow(QWidget):
                kind='success')
 
     def on_pull(self) -> None:
-        """把 GitHub 上的更新拉回本地。
+        """把 GitHub 上的更新拉回本地笔记文件夹。
 
-        **尚未实现，且不打算默默实现**：它要往用户的笔记文件夹里写文件，
-        等于让远端内容覆盖本地 —— 在「本地也改过同一篇」时怎么处理，
-        必须先跟用户把规则定清楚，不能先斩后奏。
+        三步，与推送同构：**分析（只算不写）→ 用户确认 → 备份后写回**。
+        分析阶段不碰任何文件，所以「会更新几篇、哪篇冲突」是真实数据，
+        不是先动手再报告。
         """
-        notice(self, 'Pull 还没接入',
-               '把 GitHub 上的更新拉回本地笔记文件夹，会覆盖同名的本地文件 —— '
-               '这条路径要先定好「本地也改过同一篇」时怎么办，才能动手。\n\n'
-               '现在可以先用「查看差异」，看本地和仓库具体差在哪里。',
-               kind='warning')
+        if self._push_busy:
+            return
+        if self._account is None:
+            self.bind_github_account()
+            return
+        group = self._current_group()
+        if group is None or not group.get('repo'):
+            notice(self, '还没有可拉取的仓库',
+                   '这个文件所在的文件夹还没关联 GitHub 仓库，'
+                   '远端也还没有它的内容。',
+                   kind='info')
+            return
+        if not core_config.managed_names(group):
+            notice(self, '没有纳入管理的文件',
+                   f'分组「{group.get("name")}」里还没有勾选要同步的文件。',
+                   kind='info')
+            return
+
+        # 先把编辑器里未落盘的改动写下去，再分析 ——
+        # 否则分析读到的是旧磁盘内容，会把它误判成「本地没改过」而直接覆盖。
+        self._do_autosave()
+
+        self._push_log_lines = []
+        self._push_busy = True
+        self._busy_kind = 'pull'
+        self._pull_group = group
+        self._refresh_sync()
+        self.panel.set_progress('pulling')
+        worker = PullPlanWorker(group, token=self._account.token,
+                                on_log=self._push_log)
+        worker.done.connect(self._on_pull_plan)
+        start_worker(worker)
+
+    def _on_pull_plan(self, plan) -> None:
+        """分析回来了：没事就直接说清楚，有事就弹确认层。"""
+        self._push_busy = False
+        self._busy_kind = None
+        self.panel.set_progress(None)
+        self._refresh_all()
+
+        if not plan.ok:
+            failed = plan.reason in (pipeline.REASON_GIT_ERROR,
+                                     pipeline.REASON_FETCH_FAILED)
+            notice(self, '没能读取远端',
+                   plan.message + (f'\n\n{plan.detail}' if plan.detail else ''),
+                   kind='error' if failed else 'warning')
+            return
+        if plan.reason == pipeline.REASON_UP_TO_DATE:
+            notice(self, '已经是最新', plan.message, kind='success')
+            return
+        if plan.reason == pipeline.REASON_LOCAL_AHEAD:
+            notice(self, '本地有还没推上去的改动', plan.message, kind='warning')
+            return
+
+        group = self._pull_group or self._current_group() or {}
+        dlg = PullDialog(plan, self)
+        self._center_dialog(dlg)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        self._push_busy = True
+        self._busy_kind = 'pull'
+        self._refresh_sync()
+        self.panel.set_progress('pulling')
+        worker = ApplyPullWorker(group, plan, on_log=self._push_log)
+        worker.done.connect(self._on_pull_done)
+        start_worker(worker)
+
+    def _on_pull_done(self, result) -> None:
+        self._push_busy = False
+        self._busy_kind = None
+        self.panel.set_progress(None)
+        self._reload_after_pull(result)
+        self._refresh_all()
+
+        if not result.ok:
+            notice(self, '拉取没有完成',
+                   result.message + (f'\n\n{result.detail}' if result.detail else ''),
+                   kind='error',
+                   detail='\n'.join(self._push_log_lines[-40:]))
+            return
+
+        body = result.message
+        if result.conflicts:
+            body += ('\n\n冲突的笔记保留了你本地的版本，'
+                     '想看远端那份可以点「查看差异」。')
+        if result.backup_dir:
+            body += f'\n\n改写前的版本已备份到：{result.backup_dir}'
+        notice(self, '拉取完成', body,
+               kind='warning' if result.conflicts else 'success')
+
+    def _reload_after_pull(self, result) -> None:
+        """被改写的笔记如果正开在编辑器里，重新读盘。
+
+        不做这一步，界面上显示的还是旧内容 —— 用户会以为拉取没生效，
+        然后在旧内容上继续编辑、再推回去，等于把刚拉下来的改动又盖掉。
+        """
+        if self._current is None or self._current.name not in (result.written or []):
+            return
+        try:
+            text, enc, eol = fileio.read_text(self._current)
+        except OSError:
+            return
+        self._encoding, self._eol = enc, eol
+        self.editor.load_text(text)
+        self._dirty = False
+        self._refresh_encoding()
+        self._refresh_title()
 
     def on_diff(self) -> None:
         """查看差异：本地内容 ↔ 仓库里的版本（上次推送的结果）。

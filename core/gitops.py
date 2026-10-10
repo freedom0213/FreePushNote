@@ -19,6 +19,7 @@ from . import envprobe
 
 DEFAULT_TIMEOUT = 180
 PUSH_TIMEOUT = 300
+FETCH_TIMEOUT = 180
 
 
 class GitError(RuntimeError):
@@ -405,3 +406,140 @@ def push(path: str | Path, *, token: str | None = None,
     log('     3) 授权失效 —— 在设置里重新授权 GitHub 账号。')
     log('     4) 远端有新提交（例如你曾在网页上编辑）—— 需要先拉取。')
     return False, retries
+
+
+# ---------------------------------------------------------------- 拉取 / 比对
+#
+# 下面这一组是 Pull 与「推送前远端检测」的地基。它们的共同点：
+# **全部只读或只动工作区仓库，绝不触碰用户的笔记文件夹** ——
+# 写回那一步在 core.pipeline 里显式完成，便于审计。
+
+
+def fetch(path: str | Path, branch: str, *, token: str | None = None,
+          retries: int = 2, interval: int = 4, on_log=None) -> bool:
+    """把远端分支取回本地引用（``refs/remotes/origin/<branch>``），**不动工作树**。
+
+    环境与 :func:`push` 完全一致：``GIT_CONFIG_NOSYSTEM=1`` 防止本机系统级
+    gitconfig 把 https 地址改写成 SSH（那样令牌用不上，认证会悄悄换成本机
+    密钥），令牌经环境变量交给凭据助手，不进命令行。
+    """
+    log = on_log or (lambda *_a, **_k: None)
+    if not remote_url(path):
+        log('!! 尚未配置远程仓库 origin，已跳过拉取。')
+        return False
+
+    env = push_env(token)
+    cmd = ['git', *credential_args(token), 'fetch', '--prune', 'origin', branch]
+
+    for attempt in range(1, max(retries, 1) + 1):
+        log(f'读取远端（第 {attempt}/{max(retries, 1)} 次）…')
+        try:
+            proc = _run(cmd, path, env=env, timeout=FETCH_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            log(f'！！读取远端超时（{FETCH_TIMEOUT}s）')
+            proc = None
+
+        if proc is not None:
+            for stream in (proc.stdout, proc.stderr):
+                text = _decode(stream)
+                if text.strip():
+                    log(text.rstrip())
+            if proc.returncode == 0:
+                return True
+
+        if attempt < max(retries, 1):
+            log(f'读取远端失败，{interval} 秒后重试…')
+            time.sleep(interval)
+
+    log('！！读取远端失败（网络或授权问题）。')
+    return False
+
+
+def rev_exists(path: str | Path, rev: str) -> bool:
+    """某个修订（分支名 / sha / ``HEAD``）在本地是否解析得出来。"""
+    proc = git(path, 'rev-parse', '--verify', '--quiet', rev, check=False)
+    return proc.returncode == 0
+
+
+def count_commits(path: str | Path, rev: str) -> int:
+    text = stdout_of(git(path, 'rev-list', '--count', rev, check=False))
+    return int(text) if text.isdigit() else 0
+
+
+def ahead_behind(path: str | Path, branch: str,
+                 remote: str = 'origin') -> tuple[int, int]:
+    """返回 ``(本地领先, 本地落后)`` 的提交数。
+
+    三种情形分别处理，因为它们的含义完全不同：
+
+    * 远端还没有这个分支 → ``(0, 0)``：没什么可拉的
+    * 本地还没提交过（比如新电脑第一次拉）→ ``(0, 远端提交数)``：
+      这时 ``rev-list HEAD...origin/x`` 会直接报错，不能当成「已一致」
+    * 正常情形 → 走 ``rev-list --left-right --count``
+    """
+    ref = f'{remote}/{branch}'
+    if not rev_exists(path, ref):
+        return (0, 0)
+    if not head_exists(path):
+        return (0, count_commits(path, ref))
+
+    proc = git(path, 'rev-list', '--left-right', '--count',
+               f'HEAD...{ref}', check=False)
+    if proc.returncode != 0:
+        return (0, 0)
+    parts = stdout_of(proc).split()
+    if len(parts) != 2:
+        return (0, 0)
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return (0, 0)
+
+
+def merge_base(path: str | Path, a: str, b: str) -> str:
+    """两个修订的共同祖先。**分叉时三方合并的 ``base`` 必须用它，不能用 HEAD**。"""
+    return stdout_of(git(path, 'merge-base', a, b, check=False))
+
+
+def show_file(path: str | Path, rev: str, rel: str) -> str | None:
+    """从对象库取某个文件在某次提交里的内容；该修订里没有这个文件则返回 ``None``。
+
+    一定要从**对象库**取（``git show``），不要读工作树 ——
+    工作树每次推送前都会被清空重建，只有刚复制完那一刻才等于本地笔记。
+    """
+    proc = git(path, '-c', 'core.quotepath=false', 'show', f'{rev}:{rel}', check=False)
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or b'').decode('utf-8', errors='replace')
+
+
+def merge_file(base_text: str, ours_text: str, theirs_text: str) -> tuple[str, int]:
+    """三方合并。返回 ``(合并结果, 冲突块数)``；冲突块数 > 0 表示需要人来拍板。
+
+    用 ``git merge-file``：只有**两边改到同一处**才报冲突，各改各的会自动合掉。
+    文本一律按 UTF-8 落临时文件（内容此时已经是归一化过的 UTF-8/LF）。
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix='pushnote_merge_') as td:
+        d = Path(td)
+        (d / 'base').write_text(base_text, encoding='utf-8', newline='\n')
+        (d / 'ours').write_text(ours_text, encoding='utf-8', newline='\n')
+        (d / 'theirs').write_text(theirs_text, encoding='utf-8', newline='\n')
+
+        proc = _run(['git', 'merge-file', '-p', '--diff3',
+                     str(d / 'ours'), str(d / 'base'), str(d / 'theirs')], d)
+        merged = (proc.stdout or b'').decode('utf-8', errors='replace')
+        if proc.returncode < 0:
+            raise GitError(f'三方合并失败（退出码 {proc.returncode}）')
+        return merged, proc.returncode
+
+
+def reset_hard(path: str | Path, rev: str) -> None:
+    """把工作区分支硬指向 ``rev``。
+
+    用它的唯一场合：Pull 结束后让中转区追平远端，使下一次推送是快进。
+    中转区的工作树是**临时镜像**（每次推送前都整块重建），所以丢弃它安全；
+    用户的笔记文件不受影响。
+    """
+    git(path, 'reset', '--hard', rev)

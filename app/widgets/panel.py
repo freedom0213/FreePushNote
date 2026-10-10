@@ -34,8 +34,10 @@ SYNC_STATES = {
 
 #: 忙碌状态 → 按钮下方那行小字
 _BUSY_TEXT = {
+    'checking': '正在检查远端有没有更新…',
     'preparing': '正在整理这次要提交的内容…',
     'pushing': '正在提交到 GitHub…',
+    'pulling': '正在读取远端改动…',
 }
 
 

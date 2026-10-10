@@ -474,6 +474,60 @@ def _test_diff_preview(win) -> None:
     check('差异正文含增删标记', '+第三行' in text and '-第二行' in text, text[:80])
 
 
+def _test_pull_ui(win) -> None:
+    """[20] 拉取确认层与前置分支（不联网）。"""
+    print('\n[20] 拉取确认层与前置分支')
+    from app.widgets.pulldialog import PullDialog
+    from core.pipeline import PullFile, PullPlan
+
+    plan = PullPlan(ok=True, reason=pipeline.REASON_OK, ahead=0, behind=3,
+                    remote_rev='origin/main',
+                    files=[PullFile('未改.txt', 'update', '本地没改过'),
+                           PullFile('合并.txt', 'merge', '两边不重叠'),
+                           PullFile('冲突.txt', 'conflict', '1 处相撞'),
+                           PullFile('跳过.txt', 'skip', '远端没改这篇')])
+    dlg = PullDialog(plan, win)
+    texts = [w.text() for w in dlg.findChildren(QLabel)]
+    joined = ' | '.join(texts)
+    check('标题是「拉取远端更新」', '拉取远端更新' in texts, joined[:80])
+    check('说明了远端有几个提交',
+          any('3 个提交' in t for t in texts), joined[:140])
+    check('三组清单分别列出',
+          all(k in joined for k in ('将更新', '将自动合并', '有冲突')), joined[:200])
+    check('冲突组点明会保留本地版本',
+          any('保留你的版本' in t for t in texts))
+    check('跳过的文件不进清单', '跳过.txt' not in joined, joined[:200])
+    check('备份说明写在界面上', any('backups' in t for t in texts))
+    buttons = {b.text() for b in dlg.findChildren(QPushButton)}
+    check('按钮是 取消 / 开始拉取', buttons == {'取消', '开始拉取'}, str(buttons))
+
+    plan2 = PullPlan(ok=True, reason=pipeline.REASON_OK, behind=1,
+                     files=[PullFile('a.txt', 'update', '')])
+    dlg2 = PullDialog(plan2, win)
+    texts2 = ' | '.join(w.text() for w in dlg2.findChildren(QLabel))
+    check('没有冲突时不出现「有冲突」组', '有冲突' not in texts2, texts2[:140])
+
+    # ── 前置分支：都不该启动后台任务 ──
+    # 未绑账号那条分支会打开授权对话框（还会真去申请设备码），
+    # 所以把入口换成记录器 —— 只验证「有没有被引导过去」。
+    saved = win._account
+    saved_bind = win.bind_github_account
+    called: list[int] = []
+    win._account = None
+    win.bind_github_account = lambda: called.append(1)
+    try:
+        win.on_pull()
+    finally:
+        win.bind_github_account = saved_bind
+        win._account = saved
+    check('未绑账号时引导去绑定，且不进入拉取流程',
+          called == [1] and not win._push_busy, str(called))
+
+    win.load_path(str(_TMP / 'findsrc.txt'))     # 不在任何分组里的文件
+    win.on_pull()
+    check('文件没关联仓库时不进入拉取流程', not win._push_busy)
+
+
 def main() -> int:  # noqa: C901
     print('=' * 66)
     print('FreePushNote 界面接线自测（offscreen，不联网）')
@@ -738,6 +792,7 @@ def main() -> int:  # noqa: C901
     _test_layout_order(win)
     _test_notice(app)
     _test_diff_preview(win)
+    _test_pull_ui(win)
     _test_account_page(win, app)   # 放最后：退出登录会清掉账号
 
     print('\n' + '=' * 66)

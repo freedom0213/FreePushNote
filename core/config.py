@@ -58,6 +58,9 @@ _CONFIG_HOME = os.environ.get('PUSHNOTE_HOME')
 CONFIG_DIR = Path(_CONFIG_HOME) if _CONFIG_HOME else (Path.home() / '.pushnote')
 CONFIG_PATH = CONFIG_DIR / 'config.json'
 WORKSPACES_DIR = CONFIG_DIR / 'workspaces'
+#: 拉取（Pull）前的笔记备份。写回是唯一会覆盖用户文件的操作，
+#: 备份是它最后一道保险 —— 只保留最近几次，见 pipeline._prune_backups。
+BACKUPS_DIR = CONFIG_DIR / 'backups'
 
 SCHEMA_VERSION = 2
 

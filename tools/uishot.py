@@ -342,6 +342,27 @@ def main() -> int:
         produced.append(p)
         dd.reject()
 
+    def shoot_pull() -> None:
+        """拉取确认层：三组清单 + 备份说明。"""
+        from app.widgets.pulldialog import PullDialog
+        from core import pipeline
+        from core.pipeline import PullFile, PullPlan
+
+        plan = PullPlan(ok=True, reason=pipeline.REASON_OK, ahead=0, behind=3,
+                        remote_rev='origin/main',
+                        files=[PullFile('Java八股2.txt', 'update', '本地没改过，直接用远端版本'),
+                               PullFile('Redis补充.txt', 'update', '本地没改过，直接用远端版本'),
+                               PullFile('agent开发.txt', 'merge', '两边改的位置不重叠，已自动合并'),
+                               PullFile('读书笔记.txt', 'conflict', '1 处两边改到了同一位置')])
+        dlg = PullDialog(plan, win)
+        dlg.setModal(False)
+        dlg.show()
+        app.processEvents()
+        p = out_dir / 'ui_23_pull.png'
+        dlg.grab().save(str(p))
+        produced.append(p)
+        dlg.reject()
+
     def run() -> None:
         shoot('ui_01_empty.png')                    # 空态
 
@@ -365,6 +386,7 @@ def main() -> int:
         shoot_recent_and_busy()
         shoot_new_features()
         shoot_notice_and_diff()
+        shoot_pull()
 
         dlg = GitHubAuthDialog(win)
         dlg.setModal(False)
