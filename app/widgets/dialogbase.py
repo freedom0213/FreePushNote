@@ -158,12 +158,19 @@ class FramedDialog(QDialog):
         self._subtitle.setVisible(bool(text))
 
     def add_primary(self, text: str, icon_name: str | None = None) -> QPushButton:
-        btn = QPushButton(('  ' + text) if icon_name else text)
+        """主按钮（右侧、实心主色）。
+
+        ⚠️ 不要把间距塞进文字里（曾经的写法是 ``'  ' + text``）—— 那会让按钮
+        宽度计算失真、图标与文字的距离由字体决定，看起来就是「图标贴在字上」。
+        间距交给 QSS 的 padding。
+        """
+        btn = QPushButton(text)
         btn.setObjectName('PrimaryButton')
-        btn.setFixedHeight(34)
+        btn.setFixedHeight(36)
+        btn.setMinimumWidth(104)
         if icon_name:
-            btn.setIcon(icons.icon(icon_name, '#FFFFFF', 13))
-            btn.setIconSize(QSize(13, 13))
+            btn.setIcon(icons.icon(icon_name, '#FFFFFF', 14))
+            btn.setIconSize(QSize(14, 14))
         btn.setCursor(Qt.PointingHandCursor)
         self.footer.addWidget(btn)
         return btn
@@ -171,8 +178,8 @@ class FramedDialog(QDialog):
     def add_ghost(self, text: str) -> QPushButton:
         btn = QPushButton(text)
         btn.setObjectName('DialogButton')
-        btn.setFixedHeight(34)
-        btn.setMinimumWidth(74)
+        btn.setFixedHeight(36)
+        btn.setMinimumWidth(88)
         btn.setCursor(Qt.PointingHandCursor)
         self.footer.addWidget(btn)
         return btn

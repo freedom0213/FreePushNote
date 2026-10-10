@@ -661,8 +661,8 @@ def main() -> int:  # noqa: C901
     check('右栏仓库卡片显示仓库名',
           win.panel._repo_name.text() == 'tester/demo-notes',
           win.panel._repo_name.text())
-    check('Push 按钮 = Push 到 GitHub',
-          win.panel.push_button.text() == 'Push 到 GitHub',
+    check('Push 按钮 = 推送到 GitHub',
+          win.panel.push_button.text() == '推送到 GitHub',
           win.panel.push_button.text())
     check('推送前 is_pushed 为 None（还没建工作区）',
           pipeline.is_pushed(group, '第一篇.txt') is None)
@@ -732,8 +732,8 @@ def main() -> int:  # noqa: C901
         win.load_path(str(folder / '第一篇.txt'))
         win._refresh_all()
         check('改动后 is_pushed 为假', pipeline.is_pushed(group, '第一篇.txt') is False)
-        check('改动后按钮回到 Push 到 GitHub',
-              win.panel.push_button.text() == 'Push 到 GitHub',
+        check('改动后按钮回到 推送到 GitHub',
+              win.panel.push_button.text() == '推送到 GitHub',
               win.panel.push_button.text())
         check('改动后状态卡片 = 有改动待推送',
               win.panel._status_title.text() == '有改动待推送',

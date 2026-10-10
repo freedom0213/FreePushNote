@@ -129,9 +129,11 @@ class PullDialog(QDialog):
         n_lay.addWidget(_label('动手之前会先备份', theme.TEXT_BODY,
                                theme.FS_TINY, 600))
         n_lay.addWidget(_label(
-            f'被改写的笔记会先复制一份到 {config.BACKUPS_DIR}，'
-            '只保留最近 5 次。备份失败就不会动你的文件。',
+            '被改写的笔记会先复制一份，只保留最近 5 次。备份失败就不会动你的文件。',
             theme.TEXT_SECOND, theme.FS_TINY))
+        # 路径单独一行：塞在句子里会被自动换行切在 "C:" 后面，读起来很别扭
+        n_lay.addWidget(_label(str(config.BACKUPS_DIR), theme.TEXT_FAINT,
+                               theme.FS_LABEL, mono=True))
         inner.addWidget(note)
 
         # ── 按钮 ──
@@ -140,15 +142,15 @@ class PullDialog(QDialog):
         row.addStretch(1)
         cancel = QPushButton('取消')
         cancel.setObjectName('DialogButton')
-        cancel.setFixedHeight(32)
-        cancel.setMinimumWidth(80)
+        cancel.setFixedHeight(36)
+        cancel.setMinimumWidth(88)
         cancel.setCursor(Qt.PointingHandCursor)
         cancel.clicked.connect(self.reject)
         row.addWidget(cancel)
         ok = QPushButton('开始拉取')
         ok.setObjectName('PrimaryButton')
-        ok.setFixedHeight(32)
-        ok.setMinimumWidth(96)
+        ok.setFixedHeight(36)
+        ok.setMinimumWidth(104)
         ok.setCursor(Qt.PointingHandCursor)
         ok.setDefault(True)
         ok.clicked.connect(self.accept)

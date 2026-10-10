@@ -208,7 +208,7 @@ class ManageFolderDialog(FramedDialog):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
 
-        lay.addWidget(label('把这个文件夹关联到一个 GitHub 仓库，之后点 Push 就会自动推送。',
+        lay.addWidget(label('把这个文件夹关联到一个 GitHub 仓库，之后点推送就能把它推上去。',
                             theme.TEXT_SECOND, theme.FS_TINY, wrap=True))
 
         box, _lay, self._picked_hint = _path_box(str(self._folder))

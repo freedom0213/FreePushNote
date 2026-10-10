@@ -47,7 +47,9 @@ class _ChangeRow(QWidget):
         self.check = CheckButton(checked)
         lay.addWidget(self.check)
 
-        self._title = label(name, theme.TEXT_BODY, theme.FS_UI, mono=True)
+        # 文件名用界面字体而不是等宽：等宽是为数字对齐服务的，
+        # 中文文件名用等宽会显得比周围「方」一截（真机反馈里的别扭来源之一）。
+        self._title = label(name, theme.TEXT_BODY, theme.FS_UI)
         lay.addWidget(self._title, 1)
 
         plus = label(f'+{added}', theme.SUCCESS, theme.FS_LABEL, 500, mono=True)
@@ -73,8 +75,10 @@ class _ChangeRow(QWidget):
 
     def _sync_look(self) -> None:
         on = self.check.isChecked()
-        self._title.setStyleSheet(_mono(theme.TEXT_BODY if on else theme.TEXT_GHOST,
-                                        theme.FS_UI))
+        # 与构造时保持一致：用界面字体，不用等宽（见 _ChangeRow.__init__ 的说明）
+        self._title.setStyleSheet(
+            f'color: {theme.TEXT_BODY if on else theme.TEXT_GHOST};'
+            f'font-size: {theme.FS_UI}px; font-family: {theme.UI_STACK};')
         for lab, base in ((self._plus, theme.SUCCESS), (self._minus, theme.ERROR)):
             lab.setStyleSheet(_mono(base if on else theme.TEXT_GHOST,
                                     theme.FS_LABEL, 500))
@@ -194,7 +198,9 @@ class PushDialog(FramedDialog):
 
         self._btn_cancel = self.add_ghost('取消')
         self._btn_cancel.clicked.connect(self.reject)
-        self._btn_push = self.add_primary('Push', 'push')
+        # 文案用中文：同一行左边是「取消」，右侧突然冒出一个英文 "Push"，
+        # 中英混排是这套界面里最扎眼的不一致（Pull 那边是「开始拉取」）。
+        self._btn_push = self.add_primary('开始推送', 'push')
         self._btn_push.clicked.connect(self._accept)
 
     # ───────────────────────── 交互 ─────────────────────────

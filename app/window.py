@@ -1217,7 +1217,7 @@ class FreePushWindow(QWidget):
             '本阶段只跑通了编辑器本体，设置项会在接入 GitHub 之后开放：\n\n'
             '· GitHub 账号（授权 / 撤销）\n'
             '· 受管理的文件夹（解除绑定）\n'
-            '· 推送行为：Push 前确认提交信息 / 保存后自动推送 / 推送前检测远端改动\n\n'
+            '· 推送行为：推送前确认提交信息 / 保存后自动推送 / 推送前检测远端改动\n\n'
             f'配置文件目录：{core_config.CONFIG_DIR}')
         body.setWordWrap(True)
         body.setStyleSheet(f'color: {theme.TEXT_MUTED}; font-size: {theme.FS_UI}px;')

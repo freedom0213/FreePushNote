@@ -516,13 +516,13 @@ class PushPanel(QFrame):
         """
         labels = {
             'disabled': '打开一个文件后可推送',
-            'ready': 'Push 到 GitHub',
+            'ready': '推送到 GitHub',
             'running': '推送中…',
             'success': '已推送',
             'failed': '重试推送',
             'uptodate': '已是最新，无需推送',
         }
-        self.push_button.setText(text or labels.get(state, 'Push 到 GitHub'))
+        self.push_button.setText(text or labels.get(state, '推送到 GitHub'))
         self._push_state = state
         self.push_button.setProperty('state', state)
         self.push_button.style().unpolish(self.push_button)
@@ -654,7 +654,7 @@ class PanelRail(QFrame):
         push.setIcon(icons.icon('push', theme.PRIMARY, 16))
         push.setIconSize(QSize(16, 16))
         push.setFixedSize(36, 36)
-        push.setToolTip('Push 到 GitHub（Ctrl+Enter）')
+        push.setToolTip('推送到 GitHub（Ctrl+Enter）')
         push.setCursor(Qt.PointingHandCursor)
         push.clicked.connect(self.push_requested)
         push_row = QHBoxLayout()

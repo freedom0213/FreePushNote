@@ -452,6 +452,8 @@ def qss() -> str:
         border-radius: 6px;
         font-size: {FS_UI}px;
         font-weight: 600;
+        /* 水平内边距：按钮文字两侧要留呼吸，否则图标和文字挤成一团 */
+        padding: 0 16px;
     }}
     QPushButton#PrimaryButton:hover   {{ background: {PRIMARY_HOVER}; }}
     QPushButton#PrimaryButton:pressed {{ background: {PRIMARY_PRESSED}; }}
@@ -467,6 +469,7 @@ def qss() -> str:
         border-radius: 6px;
         font-size: {FS_SMALL}px;
         font-weight: 600;
+        padding: 0 16px;
     }}
     QPushButton#DialogButton:hover {{
         background: {BG_HOVER};
@@ -481,6 +484,7 @@ def qss() -> str:
         border-radius: 6px;
         font-size: {FS_SMALL}px;
         font-weight: 600;
+        padding: 0 16px;
     }}
     QPushButton#DangerButton:hover {{
         background: {alpha(ERROR, 0.12)};
