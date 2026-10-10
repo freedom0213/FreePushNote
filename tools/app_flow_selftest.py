@@ -31,22 +31,24 @@ os.environ['PUSHNOTE_HOME'] = str(_TMP / 'home')
 
 from PySide6.QtCore import QEvent, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
-from PySide6.QtWidgets import QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QLabel, QPlainTextEdit, QPushButton  # noqa: E402
 
 from core import config, envprobe, ghauth, gitops, pipeline  # noqa: E402
 
 from app import account as account_mod  # noqa: E402
 from app.main import build_app  # noqa: E402
+from app.widgets.diffdialog import DiffDialog  # noqa: E402
 from app.widgets.managedialog import ManageFolderDialog  # noqa: E402
+from app.widgets.notice import NoticeDialog  # noqa: E402
 from app.widgets.pushdialog import PushDialog  # noqa: E402
 from app.widgets.sidebar import _close_rect  # noqa: E402
 from app.window import FreePushWindow  # noqa: E402
 
-# 模态框一律不弹：脚本要能无人值守跑完
-QMessageBox.exec = lambda self: 0                                  # type: ignore[method-assign]
-QMessageBox.information = staticmethod(lambda *a, **k: None)       # type: ignore
-QMessageBox.warning = staticmethod(lambda *a, **k: None)           # type: ignore
-QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)  # type: ignore
+# 自绘提示框一律直接返回「确定」：脚本要能无人值守跑完。
+# 注意 patch 的是 NoticeDialog.exec —— window.py 里所有提示都经过它，
+# 这是唯一需要拦的地方（QMessageBox 已经不用了）。
+NoticeDialog.exec = lambda self: 1          # 1 == QDialog.Accepted
+DiffDialog.exec = lambda self: 0            # 差异窗口：看一眼就关，不阻塞
 
 PASS = 0
 FAIL = 0
@@ -378,6 +380,100 @@ def _test_account_page(win, app) -> None:
     check('账号胶囊隐藏', win.panel._account_chip.isHidden())
 
 
+def _test_layout_order(win) -> None:
+    """[17] 三栏顺序：左栏 → 编辑区 → 右栏。
+
+    这是真机反馈出来的 bug：编辑器被中段布局和查找条容器先后接管，
+    Qt 把它从旧布局摘掉，结果编辑区爬到了右侧推送面板的右边。
+    """
+    print('\n[17] 三栏顺序（左栏 → 编辑区 → 右栏）')
+    center = win.sidebar.parentWidget()
+    lay = center.layout()
+    order = [w for w in (lay.itemAt(i).widget() for i in range(lay.count()))
+             if w is not None]
+
+    editor_area = win._editor_stack.parentWidget()
+    check('编辑器归「查找条 + 编辑器」容器管', editor_area is not None
+          and editor_area is not center)
+    check('中段布局不再直接持有编辑器', win._editor_stack not in order)
+    check('左栏在最左', order[0] is win.sidebar)
+    check('编辑区排在右栏之前',
+          order.index(editor_area) < order.index(win.panel),
+          f"editor={order.index(editor_area)} panel={order.index(win.panel)}")
+    check('右栏窄条在最右', order[-1] is win.rail)
+
+
+def _test_notice(app) -> None:
+    """[18] 统一提示框：语义配色、按钮文案、细节块。"""
+    print('\n[18] 统一提示框（替代原生 QMessageBox）')
+    from app import theme as app_theme
+    from app.widgets.notice import KINDS, NoticeDialog
+
+    check('四类语义齐备',
+          set(KINDS) == {'info', 'success', 'warning', 'error'}, str(set(KINDS)))
+    check('成功用绿色', KINDS['success'][1] == app_theme.SUCCESS)
+    check('错误用红色', KINDS['error'][1] == app_theme.ERROR)
+
+    dlg = NoticeDialog(None, '无需推送', '本地内容与 GitHub 上的一致。')
+    texts = [w.text() for w in dlg.findChildren(QLabel)]
+    check('标题进了界面', '无需推送' in texts, str(texts[:4]))
+    check('正文进了界面', any('一致' in t for t in texts), str(texts[:4]))
+    buttons = [b.text() for b in dlg.findChildren(QPushButton)]
+    check('单按钮模式只给一个按钮', buttons == ['知道了'], str(buttons))
+    check('无细节块时窗口较窄', dlg.width() == 400, str(dlg.width()))
+
+    dlg2 = NoticeDialog(None, '推送失败', '网络断了', kind='error',
+                        detail='URLError: timeout', ok_text='重试')
+    buttons2 = [b.text() for b in dlg2.findChildren(QPushButton)]
+    check('按钮文案可定制', buttons2 == ['重试'], str(buttons2))
+    check('有细节块时窗口变宽', dlg2.width() == 560, str(dlg2.width()))
+    detail_box = dlg2.findChild(QPlainTextEdit)
+    check('细节内容进了只读框',
+          detail_box is not None and 'URLError' in detail_box.toPlainText())
+
+    dlg3 = NoticeDialog(None, '退出登录？', '只清凭据，笔记不动。',
+                        ok_text='退出登录', cancel_text='取消', danger=True)
+    buttons3 = {b.text() for b in dlg3.findChildren(QPushButton)}
+    check('确认模式给两个按钮', buttons3 == {'取消', '退出登录'}, str(buttons3))
+
+
+def _test_diff_preview(win) -> None:
+    """[19] 查看差异：本地 ↔ 仓库（独立目录，不依赖前面的推送流程）。"""
+    print('\n[19] 查看差异（本地 ↔ 仓库）')
+    from core.pipeline import diff_preview
+
+    seed = _TMP / 'diffseed'
+    seed.mkdir(parents=True, exist_ok=True)
+    (seed / 'A.txt').write_text('第一行\n第二行\n', encoding='utf-8', newline='\n')
+    group = {'id': 'seedone', 'name': '种子组', 'folder': str(seed),
+             'repo': 'u/r', 'branch': 'main', 'files': ['A.txt']}
+
+    ws = pipeline.workspace_dir(group)
+    ws.mkdir(parents=True, exist_ok=True)
+    gitops.init_repo(ws)
+    gitops.git(ws, 'config', 'user.name', 'tester')
+    gitops.git(ws, 'config', 'user.email', 'tester@example.com')
+    (ws / 'A.txt').write_text('第一行\n第二行\n', encoding='utf-8', newline='\n')
+    gitops.add_all(ws)
+    gitops.commit(ws, 'init')
+
+    check('内容与仓库一致时没有差异', diff_preview(group) == [],
+          str(diff_preview(group)))
+
+    (seed / 'A.txt').write_text('第一行\n改过的第二行\n第三行\n',
+                                encoding='utf-8', newline='\n')
+    rows = diff_preview(group)
+    check('改动后出现 1 篇差异', len(rows) == 1, str(len(rows)))
+    row = rows[0] if rows else {}
+    check('差异条目带文件名', row.get('name') == 'A.txt', str(row.get('name')))
+    check('新增行数正确', row.get('added') == 2, str(row.get('added')))
+    check('删除行数正确', row.get('removed') == 1, str(row.get('removed')))
+    text = str(row.get('text') or '')
+    check('差异正文是统一格式（有 --- / +++ 头）',
+          '---' in text and '+++' in text)
+    check('差异正文含增删标记', '+第三行' in text and '-第二行' in text, text[:80])
+
+
 def main() -> int:  # noqa: C901
     print('=' * 66)
     print('FreePushNote 界面接线自测（offscreen，不联网）')
@@ -639,6 +735,9 @@ def main() -> int:  # noqa: C901
     _test_busy_indicator(win, app)
     _test_sidebar_search(win)
     _test_findbar(win, app)
+    _test_layout_order(win)
+    _test_notice(app)
+    _test_diff_preview(win)
     _test_account_page(win, app)   # 放最后：退出登录会清掉账号
 
     print('\n' + '=' * 66)

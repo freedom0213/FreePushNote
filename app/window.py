@@ -19,7 +19,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame,
-                               QHBoxLayout, QInputDialog, QLabel, QMessageBox,
+                               QHBoxLayout, QInputDialog, QLabel,
                                QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 # ── Windows 专用：让系统自己回答「这个点在窗口的哪个部位」 ──
@@ -48,9 +48,11 @@ from core import gitops, pipeline
 from . import account as account_mod, fileio, icons, theme
 from .widgets.accountdialog import AccountDialog
 from .widgets.authdialog import GitHubAuthDialog
+from .widgets.diffdialog import DiffDialog
 from .widgets.editor import CodeEditor
 from .widgets.findbar import FindBar
 from .widgets.managedialog import ManageFolderDialog
+from .widgets.notice import ask, notice
 from .widgets.pushdialog import PushDialog
 from .workers import PushWorker, StageWorker, start_worker
 from .widgets.panel import PanelRail, PushPanel
@@ -271,7 +273,25 @@ class FreePushWindow(QWidget):
         self._editor_stack = QStackedWidget()
         self._editor_stack.addWidget(_EmptyState())
         self._editor_stack.addWidget(self.editor)
-        center_lay.addWidget(self._editor_stack, 1)
+
+        # 编辑区 = 查找条 + 编辑器。查找条平时藏着，Ctrl+F 才落下来 ——
+        # 它属于编辑区（找的是这一篇里的词），不占工具栏的位置。
+        #
+        # ⚠️ 顺序即位置：这里 addWidget 的先后决定了三栏的左右关系。
+        # 编辑器**只能**被加一次 —— 之前它先被中段布局收走、又被这里收进
+        # 查找条容器，Qt 会把它从旧布局摘掉，结果整个编辑区被排到了推送面板
+        # 右边（左栏 → 右栏 → 编辑区），界面上一眼就能看出不对。
+        self._findbar = FindBar(self.editor)
+        self._findbar.setVisible(False)
+        self._findbar.close_requested.connect(self._close_findbar)
+
+        editor_area = QWidget()
+        editor_lay = QVBoxLayout(editor_area)
+        editor_lay.setContentsMargins(0, 0, 0, 0)
+        editor_lay.setSpacing(0)
+        editor_lay.addWidget(self._findbar)
+        editor_lay.addWidget(self._editor_stack, 1)
+        center_lay.addWidget(editor_area, 1)
 
         self.panel = PushPanel()
         self.panel.collapse_requested.connect(lambda: self.toggle_panel(False))
@@ -288,20 +308,6 @@ class FreePushWindow(QWidget):
         self.rail.push_requested.connect(self.on_push)
         self.rail.settings_requested.connect(self.open_settings)
         center_lay.addWidget(self.rail)
-
-        # 编辑区 = 查找条 + 编辑器。查找条平时藏着，Ctrl+F 才落下来 ——
-        # 它属于编辑区（找的是这一篇里的词），不占工具栏的位置。
-        self._findbar = FindBar(self.editor)
-        self._findbar.setVisible(False)
-        self._findbar.close_requested.connect(self._close_findbar)
-
-        editor_area = QWidget()
-        editor_lay = QVBoxLayout(editor_area)
-        editor_lay.setContentsMargins(0, 0, 0, 0)
-        editor_lay.setSpacing(0)
-        editor_lay.addWidget(self._findbar)
-        editor_lay.addWidget(self._editor_stack, 1)
-        center_lay.addWidget(editor_area, 1)
 
         inner.addWidget(center, 1)
 
@@ -343,13 +349,13 @@ class FreePushWindow(QWidget):
     def load_path(self, path: str) -> None:
         p = Path(path)
         if not p.is_file():
-            QMessageBox.warning(self, '文件不存在', f'找不到这个文件：\n{p}')
+            notice(self, '文件不存在', f'找不到这个文件：\n\n{p}', kind='warning')
             self._remove_recent(str(p))
             return
         try:
             text, enc, eol = fileio.read_text(p)
         except OSError as exc:
-            QMessageBox.warning(self, '打不开这个文件', f'{p}\n\n{exc}')
+            notice(self, '打不开这个文件', f'{p}\n\n{exc}', kind='error')
             return
 
         self._current = p
@@ -377,7 +383,7 @@ class FreePushWindow(QWidget):
             fileio.write_text(self._current, self.editor.toPlainText(),
                               self._encoding, self._eol)
         except OSError as exc:
-            QMessageBox.warning(self, '保存失败', f'{self._current}\n\n{exc}')
+            notice(self, '保存失败', f'{self._current}\n\n{exc}', kind='error')
             return False
         self._dirty = False
         # 存过了 → 它才算真正「最近用过」，这时才值得排到第一位。
@@ -822,8 +828,8 @@ class FreePushWindow(QWidget):
         try:
             core_config.save(self._cfg)
         except OSError as exc:
-            QMessageBox.warning(self, '没能保存配置',
-                                f'绑定的信息写不进配置文件：\n{exc}')
+            notice(self, '没能保存配置',
+                   f'绑定的信息写不进配置文件：\n\n{exc}', kind='error')
             return None
         self._refresh_all()
         return dlg.group
@@ -856,7 +862,12 @@ class FreePushWindow(QWidget):
             return
         if not staged.has_changes:
             self._refresh_all()
-            QMessageBox.information(self, '无需推送', staged.message)
+            # 文案写死在这里，**不要**用 staged.message ——
+            # 整理成功但没有变更时，那个字段是空的（stage_group 只在失败分支
+            # 填它），照搬过来就是一个只有图标和 OK 的空框，等于什么也没说。
+            notice(self, '无需推送',
+                   '本地内容与 GitHub 上的一致，没有需要推送的改动。',
+                   kind='info')
             return
 
         group = self._push_group or self._current_group() or {}
@@ -888,9 +899,10 @@ class FreePushWindow(QWidget):
             self.panel.set_push_state('success', text=f'已推送 {result.commit}')
             QTimer.singleShot(1800, self._refresh_all)
             if result.warnings:
-                QMessageBox.information(
-                    self, '推送完成（有提醒）',
-                    f'{result.message}\n\n' + '\n'.join(f'· {w}' for w in result.warnings))
+                notice(self, '推送完成（有提醒）',
+                       result.message + '\n\n'
+                       + '\n'.join(f'· {w}' for w in result.warnings),
+                       kind='warning')
             return
 
         self._push_failed(result.message, result.detail, result.warnings)
@@ -908,14 +920,10 @@ class FreePushWindow(QWidget):
         text = message
         if warnings:
             text += '\n\n' + '\n'.join(f'· {w}' for w in warnings)
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle('推送失败')
-        box.setText(text)
-        box.setInformativeText('改动已保存在本地，不会丢失。修好后可以直接重试。')
-        if detail or self._push_log_lines:
-            box.setDetailedText(detail or '\n'.join(self._push_log_lines[-40:]))
-        box.exec()
+        notice(self, '推送失败',
+               text + '\n\n改动已保存在本地，不会丢失。修好后可以直接重试。',
+               kind='error',
+               detail=detail or '\n'.join(self._push_log_lines[-40:]))
 
     # ───────────────────────── GitHub 账号绑定 ─────────────────────────
 
@@ -933,17 +941,17 @@ class FreePushWindow(QWidget):
 
         if not dlg.persisted:
             # 令牌没存下来就别说「已绑定」——否则下次启动用户会发现白绑了
-            QMessageBox.warning(
-                self, '令牌没能保存到本机',
-                f'{self._account.display} 授权成功了，但令牌写入本机凭据目录失败。\n\n'
-                '这次会话内可以正常使用；下次启动需要重新授权。\n\n'
-                f'凭据目录：{core_config.CONFIG_DIR / "credentials"}')
+            notice(self, '令牌没能保存到本机',
+                   f'{self._account.display} 授权成功了，但令牌写入本机凭据目录失败。\n\n'
+                   '这次会话内可以正常使用；下次启动需要重新授权。\n\n'
+                   f'凭据目录：{core_config.CONFIG_DIR / "credentials"}',
+                   kind='warning')
         else:
-            QMessageBox.information(
-                self, '已绑定 GitHub 账号',
-                f'{self._account.display} 已连接。\n\n'
-                '接下来打开一个 txt，点右侧的「纳入 GitHub 管理」，'
-                '就能把它关联到仓库并推送。')
+            notice(self, '已绑定 GitHub 账号',
+                   f'{self._account.display} 已连接。\n\n'
+                   '接下来打开一个 txt，点右侧的「纳入 GitHub 管理」，'
+                   '就能把它关联到仓库并推送。',
+                   kind='success')
 
     def _center_dialog(self, dlg: QDialog) -> None:
         """把对话框摆在主窗口中间（无边框窗口不会自动居中）。"""
@@ -979,16 +987,53 @@ class FreePushWindow(QWidget):
         account_mod.unbind()
         self._account = None
         self._refresh_all()
-        QMessageBox.information(
-            self, '已退出登录',
-            '本机已不再保存这个账号的令牌。\n\n'
-            '笔记和仓库配置都还在，重新授权后照常推送。')
+        notice(self, '已退出登录',
+               '本机已不再保存这个账号的令牌。\n\n'
+               '笔记和仓库配置都还在，重新授权后照常推送。',
+               kind='success')
 
     def on_pull(self) -> None:
-        QMessageBox.information(self, '尚未接入', 'Pull 会在绑定仓库后开放。')
+        """把 GitHub 上的更新拉回本地。
+
+        **尚未实现，且不打算默默实现**：它要往用户的笔记文件夹里写文件，
+        等于让远端内容覆盖本地 —— 在「本地也改过同一篇」时怎么处理，
+        必须先跟用户把规则定清楚，不能先斩后奏。
+        """
+        notice(self, 'Pull 还没接入',
+               '把 GitHub 上的更新拉回本地笔记文件夹，会覆盖同名的本地文件 —— '
+               '这条路径要先定好「本地也改过同一篇」时怎么办，才能动手。\n\n'
+               '现在可以先用「查看差异」，看本地和仓库具体差在哪里。',
+               kind='warning')
 
     def on_diff(self) -> None:
-        QMessageBox.information(self, '尚未接入', '查看差异会在绑定仓库后开放。')
+        """查看差异：本地内容 ↔ 仓库里的版本（上次推送的结果）。
+
+        只读、不联网 —— 从工作区的 git 历史里取旧版，跟本地现读的内容比。
+        「这次会改什么」在点开之前是看不见的，这个按钮就是为这件事存在的。
+        """
+        group = self._current_group()
+        if group is None or not group.get('repo'):
+            notice(self, '还没有可比较的版本',
+                   '这个文件所在的文件夹还没关联 GitHub 仓库，'
+                   '仓库里没有它的历史版本。',
+                   kind='info')
+            return
+        if not core_config.managed_names(group):
+            notice(self, '没有纳入管理的文件',
+                   f'分组「{group.get("name")}」里还没有勾选要推送的文件。',
+                   kind='info')
+            return
+
+        rows = pipeline.diff_preview(group)
+        if not rows:
+            notice(self, '没有未推送的改动',
+                   '本地内容与仓库里的一致，没有需要推送的改动。',
+                   kind='info')
+            return
+
+        dlg = DiffDialog(rows, self)
+        self._center_dialog(dlg)
+        dlg.exec()
 
     def open_settings(self) -> None:
         dlg = QDialog(self)
@@ -1064,10 +1109,10 @@ class FreePushWindow(QWidget):
             subprocess.Popen(['explorer', '/select,', str(p)])
         elif chosen is act_rename:
             if managed:
-                QMessageBox.information(
-                    self, '不能重命名',
-                    '这个文件受 GitHub 管理，改名会中断仓库中的历史记录。\n'
-                    '如果确实要改名，请先在文件上选择「从管理中移除」。')
+                notice(self, '不能重命名',
+                       '这个文件受 GitHub 管理，改名会中断仓库中的历史记录。\n'
+                       '如果确实要改名，请先在文件上选择「从管理中移除」。',
+                       kind='warning')
             else:
                 self._rename_file(p)
         elif chosen is act_manage:
@@ -1078,18 +1123,17 @@ class FreePushWindow(QWidget):
 
     def _remove_from_managed(self, path: Path, group: dict) -> None:
         """把一篇笔记移出白名单；下次推送时它会从仓库里消失。"""
-        if QMessageBox.question(
-                self, '从管理中移除',
-                f'「{path.name}」将不再推送到 GitHub。\n\n'
-                f'下次推送时，它会从仓库里移除（本地文件不受影响）。',
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if not ask(self, '从管理中移除',
+                   f'「{path.name}」将不再推送到 GitHub。\n\n'
+                   f'下次推送时，它会从仓库里移除（本地文件不受影响）。',
+                   ok_text='移除', danger=True):
             return
         names = [n for n in core_config.managed_names(group) if n != path.name]
         core_config.set_files(self._cfg, str(group.get('id')), names)
         try:
             core_config.save(self._cfg)
         except OSError as exc:
-            QMessageBox.warning(self, '没能保存配置', str(exc))
+            notice(self, '没能保存配置', str(exc), kind='error')
             return
         self._refresh_all()
 
@@ -1099,12 +1143,12 @@ class FreePushWindow(QWidget):
             return
         target = p.with_name(new_name)
         if target.exists():
-            QMessageBox.warning(self, '重命名失败', f'{new_name} 已经存在。')
+            notice(self, '重命名失败', f'{new_name} 已经存在。', kind='warning')
             return
         try:
             p.rename(target)
         except OSError as exc:
-            QMessageBox.warning(self, '重命名失败', str(exc))
+            notice(self, '重命名失败', str(exc), kind='error')
             return
         if self._current == p:
             self._current = target

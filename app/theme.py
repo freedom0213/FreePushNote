@@ -403,6 +403,28 @@ def qss() -> str:
     QFrame#DialogHeader {{
         border-bottom: 1px solid {BORDER};
     }}
+    /* 提示对话框（notice.py）：同一套卡片外壳，标题栏改用图标 + 标题 */
+    QFrame#NoticeHeader {{
+        border-bottom: 1px solid {BORDER};
+    }}
+    QPlainTextEdit#NoticeDetail {{
+        background: {BG_INPUT};
+        border: 1px solid {BORDER};
+        border-radius: 6px;
+        color: {TEXT_SECOND};
+        font-family: {MONO_STACK};
+        font-size: {FS_TINY}px;
+        padding: 6px 8px;
+        selection-background-color: {BG_SELECTED};
+    }}
+    /* 差异视图：只给颜色，**不写 font-family** —— 由 setFont 指定等宽字体，
+       QSS 一旦沾上字体属性就会把 setFont 顶掉（编辑区踩过这个坑） */
+    QPlainTextEdit#DiffView {{
+        background: {BG_INPUT};
+        border: none;
+        color: {TEXT_SECOND};
+        selection-background-color: {BG_SELECTED};
+    }}
     /* 验证码：整个界面上唯一允许「大而显眼」的文字 */
     QLabel#AuthCode {{
         background: {BG_INPUT};

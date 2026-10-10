@@ -28,6 +28,7 @@
 """
 from __future__ import annotations
 
+import difflib
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -431,3 +432,64 @@ def is_pushed(group: dict, name: str) -> bool | None:
     # 这里**不能**用 stdout_of（它会 strip），尾随换行也是内容的一部分
     committed = (proc.stdout or b'').decode('utf-8', errors='replace')
     return committed == text
+
+
+# ─────────────────────────── 差异预览 ───────────────────────────
+
+def _head_text(ws: Path, name: str) -> str:
+    """仓库里 ``name`` 现在的内容（上一次提交的版本）；没有则空串。"""
+    if not gitops.is_repo(ws) or not gitops.head_exists(ws):
+        return ''
+    # quotepath：中文文件名默认会被 git 转义成 \346\212\200 这种形式，
+    # 那样 ``HEAD:<name>`` 就找不到文件了。只作用于这一条命令。
+    proc = gitops.git(ws, '-c', 'core.quotepath=false',
+                      'show', f'HEAD:{Path(name).name}', check=False)
+    if proc.returncode != 0:
+        return ''
+    return (proc.stdout or b'').decode('utf-8', errors='replace')
+
+
+def diff_preview(group: dict, *, names: list[str] | None = None) -> list[dict]:
+    """预览「这次推送到底会改什么」：仓库里的版本 ↔ 本地现在的样子。
+
+    不需要联网，也不要求先走过一遍推送流程 —— 旧版直接从工作区的 git 历史里
+    取，新版把本地笔记按**推送时完全相同的规则**归一化（自动识别编码 + 统一
+    LF），所以界面上看到的增删就是推上去之后真实发生的增删，不是另算一套。
+
+    返回 ``[{'name','added','removed','text'}, ...]``，**只含真有差异的文件**；
+    全部一致时返回空列表（界面据此说「没有未推送的改动」，而不是弹一个空白窗）。
+    """
+    folder = Path(str(group.get('folder') or ''))
+    ws = workspace_dir(group)
+    picked = list(names if names is not None else config.managed_names(group))
+
+    out: list[dict] = []
+    for name in picked:
+        src = folder / name
+        if not src.is_file():
+            continue
+        try:
+            text, _encoding = convert.read_text_auto(src)
+        except convert.NoteFormatError:
+            continue
+
+        new = text.replace('\r\n', '\n').replace('\r', '\n')
+        old = _head_text(ws, name)
+        if old == new:
+            continue
+
+        lines: list[str] = []
+        added = removed = 0
+        for line in difflib.unified_diff(
+                old.splitlines(), new.splitlines(),
+                fromfile=f'仓库 · {name}', tofile=f'本地 · {name}',
+                lineterm='', n=2):
+            lines.append(line)
+            if line.startswith('+') and not line.startswith('+++'):
+                added += 1
+            elif line.startswith('-') and not line.startswith('---'):
+                removed += 1
+
+        out.append({'name': name, 'added': added, 'removed': removed,
+                    'text': '\n'.join(lines)})
+    return out

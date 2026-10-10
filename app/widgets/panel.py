@@ -117,6 +117,65 @@ def _label(text: str, color: str = theme.TEXT_MUTED, size: float = theme.FS_TINY
     return lab
 
 
+class _AccountChip(QLabel):
+    """头部账号胶囊：点得动，而且**看得出能点**。
+
+    它是个 ``QLabel``，但 QSS 的 ``:hover`` 要求控件开 ``WA_Hover`` 才会被
+    Qt 维护，默认不开 —— 只写样式表是不会有任何反应的（用户的原话：
+    「鼠标停留在 @freedom0213 没有任何反应，只是鼠标变成手势」）。
+    所以悬停状态自己维护，样式自己刷新，行为最确定，也不用猜 Qt 的脾气。
+
+    悬停反馈做三件事：底色加深、补一圈同色描边、文字提亮。
+    描边始终占位（只是透明/不透明），避免鼠标进出时胶囊尺寸跳动。
+    """
+
+    clicked = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._login = ''
+        self._base = theme.SUCCESS
+        self._hover = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setAlignment(Qt.AlignCenter)
+
+    def set_account(self, login: str, warn: bool = False) -> None:
+        self._login = login
+        self._base = theme.WARNING if warn else theme.SUCCESS
+        self.setText(f'@{login}')
+        self.setToolTip('账号凭据可能已失效 —— 点击查看账户信息' if warn
+                        else '已连接的 GitHub 账号 —— 点击查看账户信息')
+        self._restyle()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hover = True
+        self._restyle()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = False
+        self._restyle()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _restyle(self) -> None:
+        fill = 0.30 if self._hover else 0.14
+        edge = theme.alpha(self._base, 0.60 if self._hover else 0.0)
+        self.setStyleSheet(
+            f'color: {self._base}; font-size: 10px;'
+            f'background: {theme.alpha(self._base, fill)};'
+            f'border: 1px solid {edge};'
+            f'border-radius: 4px; padding: 2px 7px;'
+            f'font-family: {theme.MONO_STACK};')
+
+
 class PushPanel(QFrame):
     """右侧栏 300px。"""
 
@@ -182,11 +241,10 @@ class PushPanel(QFrame):
 
         # 已连接的账号。绑完之后界面上得有地方一直显示它 ——
         # 否则用户没法一眼确认「我推的是哪个账号」，推错账号是很难发现的错误。
-        # 它同时是账户页的入口：能一直看见的东西就该能点。
-        self._account_chip = QLabel('')
+        # 它同时是账户页的入口：能一直看见的东西就该能点，且点得动要看得出。
+        self._account_chip = _AccountChip()
         self._account_chip.setVisible(False)
-        self._account_chip.setCursor(Qt.PointingHandCursor)
-        self._account_chip.mousePressEvent = lambda _e: self.account_chip_clicked.emit()  # type: ignore[method-assign]
+        self._account_chip.clicked.connect(self.account_chip_clicked)
         lay.addWidget(self._account_chip)
 
         lay.addStretch(1)
@@ -430,16 +488,7 @@ class PushPanel(QFrame):
         if not login:
             self._account_chip.setVisible(False)
             return
-        color = theme.WARNING if warn else theme.SUCCESS
-        self._account_chip.setText(f'@{login}')
-        self._account_chip.setStyleSheet(
-            f'color: {color}; font-size: 10px;'
-            f'background: {theme.alpha(color, 0.14)};'
-            f'border-radius: 4px; padding: 2px 6px;'
-            f'font-family: {theme.MONO_STACK};')
-        self._account_chip.setToolTip(
-            '账号凭据可能已失效，建议重新授权' if warn
-            else f'已连接的 GitHub 账号，点击查看账户信息')
+        self._account_chip.set_account(login, warn)
         self._account_chip.setVisible(True)
 
     def set_last_sync(self, relative: str | None, short_hash: str | None = None) -> None:

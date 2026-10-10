@@ -113,6 +113,10 @@ _TEMPLATES: dict[str, str] = {
                      'stroke="{c}" stroke-width="1.4"/><path d="M9 5.2v4.8" stroke="{c}" '
                      'stroke-width="1.5" stroke-linecap="round"/><circle cx="9" cy="12.8" r="0.9" '
                      'fill="{c}"/></svg>'),
+    'info-circle': ('<svg viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7.4" '
+                    'stroke="{c}" stroke-width="1.4"/><path d="M9 8.4v4.4" stroke="{c}" '
+                    'stroke-width="1.5" stroke-linecap="round"/><circle cx="9" cy="5.7" r="0.9" '
+                    'fill="{c}"/></svg>'),
     'branch': ('<svg viewBox="0 0 12 12" fill="none"><circle cx="3.2" cy="2.8" r="1.4" '
                'stroke="{c}"/><circle cx="3.2" cy="9.2" r="1.4" stroke="{c}"/><circle cx="8.8" '
                'cy="5.2" r="1.4" stroke="{c}"/><path d="M3.2 4.2v3.6" stroke="{c}"/><path '

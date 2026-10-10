@@ -267,6 +267,81 @@ def main() -> int:
         produced.append(p)
         dlg.reject()
 
+    def shoot_notice_and_diff() -> None:
+        """统一提示框（三态）+ 差异窗口 + 账号胶囊悬停。"""
+        from app.widgets.diffdialog import DiffDialog
+        from app.widgets.notice import NoticeDialog
+
+        # 账号胶囊：先让界面上有账号，再手工置成悬停态
+        win._refresh_all()
+        chip = win.panel._account_chip
+        chip.set_account('freedom0213')
+        chip.setVisible(True)
+        chip._hover = True
+        chip._restyle()
+        app.processEvents()
+        p = out_dir / 'ui_21_chip_hover.png'
+        win.panel.grab().save(str(p))
+        produced.append(p)
+        chip._hover = False
+        chip._restyle()
+
+        shots = [
+            ('ui_18_notice_info.png',
+             dict(title='无需推送', kind='info',
+                  body='本地内容与 GitHub 上的一致，没有需要推送的改动。')),
+            ('ui_19_notice_success.png',
+             dict(title='推送完成（有提醒）', kind='success',
+                  body='已推送 2 个文件。\n\n· Java八股2.txt：本地是 GBK 编码，'
+                       '仓库里已转成 UTF-8')),
+            ('ui_20_notice_error.png',
+             dict(title='推送失败', kind='error', ok_text='重试推送',
+                  body='推送失败，改动已保存在本地，可以重试。\n\n'
+                       '改动已保存在本地，不会丢失。修好后可以直接重试。',
+                  detail='fatal: unable to access https://github.com/freedom0213/'
+                         'FreePushNote-test1.git/\n'
+                         'Recv failure: Connection was reset (10054)')),
+        ]
+        for name, kwargs in shots:
+            dlg = NoticeDialog(win, **kwargs)
+            dlg.setModal(False)
+            dlg.show()
+            app.processEvents()
+            p = out_dir / name
+            dlg.grab().save(str(p))
+            produced.append(p)
+            dlg.reject()
+
+        rows = [
+            {'name': 'Java八股2.txt', 'added': 3, 'removed': 1,
+             'text': '--- 仓库 · Java八股2.txt\n'
+                     '+++ 本地 · Java八股2.txt\n'
+                     '@@ -1,4 +1,6 @@\n'
+                     ' 16：Spring 的 IoC 容器是什么？\n'
+                     ' \n'
+                     '-容器负责创建对象。\n'
+                     '+IoC 是 Inversion of Control，控制反转。它把对象的创建与依赖装配\n'
+                     '+交给容器统一管理。\n'
+                     '+对象自己不再负责 new 依赖对象。\n'
+                     ' \n'
+                     ' 常见实现有两种。'},
+            {'name': 'Redis补充.txt', 'added': 2, 'removed': 0,
+             'text': '--- 仓库 · Redis补充.txt\n'
+                     '+++ 本地 · Redis补充.txt\n'
+                     '@@ -3,3 +3,5 @@\n'
+                     ' RDB 是快照。\n'
+                     '+AOF 记的是写命令日志。\n'
+                     '+两种可以同时开。'},
+        ]
+        dd = DiffDialog(rows, win)
+        dd.setModal(False)
+        dd.show()
+        app.processEvents()
+        p = out_dir / 'ui_22_diff.png'
+        dd.grab().save(str(p))
+        produced.append(p)
+        dd.reject()
+
     def run() -> None:
         shoot('ui_01_empty.png')                    # 空态
 
@@ -289,6 +364,7 @@ def main() -> int:
 
         shoot_recent_and_busy()
         shoot_new_features()
+        shoot_notice_and_diff()
 
         dlg = GitHubAuthDialog(win)
         dlg.setModal(False)
