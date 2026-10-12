@@ -702,6 +702,35 @@ def _test_unbind_group(win) -> None:
           == len(after))
 
 
+def _test_app_icon(win) -> None:
+    """[23] 应用图标：多尺寸 .ico 已接入窗口与任务栏。"""
+    print('\n[23] 应用图标')
+    from app import icons as icons_mod
+
+    ico = icons_mod._asset_path('assets', 'icon', 'app.ico')
+    check('能找到 assets/icon/app.ico', ico is not None, str(ico))
+    if ico is None:
+        return
+
+    loaded = icons_mod.app_icon()
+    check('app_icon() 返回可用图标', not loaded.isNull())
+    sizes = sorted({s.width() for s in loaded.availableSizes()})
+    check('图标内含多个尺寸（说明用的是 .ico，不是矢量回退）',
+          len(sizes) >= 4, str(sizes))
+    check('含任务栏需要的 16px', 16 in sizes, str(sizes))
+    check('含资源管理器大图标需要的 256px', 256 in sizes, str(sizes))
+    check('窗口图标已设置', not win.windowIcon().isNull())
+
+    # 资源缺失时必须能退回矢量图标，而不是崩掉
+    real = icons_mod._asset_path
+    icons_mod._asset_path = lambda *a: None
+    try:
+        fallback = icons_mod.app_icon()
+        check('资源缺失时回退到矢量图标且不崩', not fallback.isNull())
+    finally:
+        icons_mod._asset_path = real
+
+
 def main() -> int:  # noqa: C901
     print('=' * 66)
     print('FreePushNote 界面接线自测（offscreen，不联网）')
@@ -970,6 +999,7 @@ def main() -> int:  # noqa: C901
     _test_settings_ui(win, app)
     _test_account_page(win, app)   # 退出登录会清掉账号
     _test_unbind_group(win)        # 放最后：它会删掉分组
+    _test_app_icon(win)
 
     print('\n' + '=' * 66)
     print(f'通过 {PASS} / {PASS + FAIL}')

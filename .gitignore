@@ -43,3 +43,10 @@ Desktop.ini
 # 项目现状、设计说明这类个人笔记刻意放在仓库根目录（方便翻），但不跟踪。
 # 新增同类文档时在这里补一行。
 FreePushNote-项目现状.md
+
+# ────────────── 图标中间产物 ──────────────
+# 仓库里只留两样：source.jpg（母版源，人工维护）和 app.ico（成品，打包要用）。
+# app.png 是脚本从 source.jpg 抠出来的 1024 母版，1.2MB 且随时可重建：
+#     python tools/make_icon.py assets/icon/source.jpg
+assets/icon/app.png
+

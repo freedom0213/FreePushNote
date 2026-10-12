@@ -8,8 +8,15 @@
 
 每套路径都是 16×16 或 12×12 的线性图标，描边宽度 1.1–1.8，
 与设计稿（Ardot 733847576651907）保持一致。
+
+**应用图标（标题栏/任务栏那个）是唯一的例外**：它用的是
+``assets/icon/app.ico`` 位图（多尺寸），由 ``tools/make_icon.py`` 从母版生成。
+矢量画不出角色插画，而图标恰恰需要那张插画来立住品牌。
 """
 from __future__ import annotations
+
+import sys
+from pathlib import Path
 
 from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtGui import QIcon, QPainter, QPixmap
@@ -192,6 +199,37 @@ def icon(name: str, color: str = C_BODY, size: int = 16,
     return QIcon(px)
 
 
+def _asset_path(*parts: str) -> Path | None:
+    """定位随程序分发的资源文件。
+
+    开发时资源在项目根目录下；PyInstaller 打包后会被解到 ``sys._MEIPASS``。
+    两处都找不到返回 ``None`` —— 调用方必须能接受「资源缺失」这件事，
+    一个图标文件不该让程序起不来。
+    """
+    roots: list[Path] = []
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        roots.append(Path(meipass))
+    roots.append(Path(__file__).resolve().parent.parent)
+    for root in roots:
+        candidate = root.joinpath(*parts)
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def app_icon() -> QIcon:
-    """应用图标（标题栏与任务栏共用）。"""
+    """应用图标（标题栏与任务栏共用）。
+
+    优先用 ``assets/icon/app.ico``：它内含 16 / 32 / 48 / 64 / 128 / 256
+    六个尺寸，Windows 会按场合自己挑（任务栏要 16、Alt+Tab 要 32、
+    资源管理器大图标要 256）—— 这就是为什么图标必须是 .ico 而不是一张 png。
+
+    取不到就退回代码画的矢量图标。程序在任何情况下都要能起来。
+    """
+    ico = _asset_path('assets', 'icon', 'app.ico')
+    if ico is not None:
+        loaded = QIcon(str(ico))
+        if not loaded.isNull():
+            return loaded
     return icon('app', C_SECOND, 16, second=C_PRIMARY)
