@@ -55,6 +55,7 @@ from .widgets.managedialog import ManageFolderDialog
 from .widgets.notice import ask, notice
 from .widgets.pulldialog import PullDialog
 from .widgets.pushdialog import PushDialog
+from .widgets.settingsdialog import SettingsDialog
 from .workers import (ApplyPullWorker, PullPlanWorker, PushWorker,
                       RemoteCheckWorker, StageWorker, start_worker)
 from .widgets.panel import PanelRail, PushPanel
@@ -195,6 +196,10 @@ class FreePushWindow(QWidget):
         self._pull_group: dict | None = None
         #: 当前忙的是什么：'push' | 'pull' | None —— 界面文案要跟着变
         self._busy_kind: str | None = None
+        #: 本次推送是否静默（自动推送触发时为真：不弹任何对话框）
+        self._push_silent = False
+        #: 上次「保存后自动推送」的时间戳，用来节流（见 _maybe_auto_push）
+        self._last_auto_push = 0.0
 
         # Windows 无边框窗口的「点任务栏最小化」只允许修一次（见 showEvent）
         self._taskbar_fixed = False
@@ -396,6 +401,7 @@ class FreePushWindow(QWidget):
         # 不区分是 Ctrl+S 还是防抖落盘。
         self._promote_recent(str(self._current))
         self._refresh_title()
+        self._maybe_auto_push()
         return True
 
     def save_file_as(self) -> bool:
@@ -415,6 +421,36 @@ class FreePushWindow(QWidget):
         """自动保存：只覆盖已有文件，不弹「另存为」——没人希望打字打到一半跳对话框。"""
         if self._dirty and self._current is not None:
             self.save_file()
+
+    #: 「保存后自动推送」的最小间隔（秒）。自动保存每 800ms 就可能落一次盘，
+    #: 不节流就成了「打几个字推一次」，那既打扰又毫无意义。
+    AUTO_PUSH_INTERVAL = 90.0
+
+    def _maybe_auto_push(self) -> None:
+        """保存落盘之后，如果开了「保存后自动推送」，就静默推一次。
+
+        **静默**是必须的：此刻用户正在打字，这时候弹确认层或者失败框都是打扰。
+        结果只反映在右栏状态卡片和状态栏上；真出问题，用户下次手动点推送时
+        还会再看到一次。
+
+        条件都要齐：已绑账号、当前文件在某个已关联仓库的分组里、并且确实被纳管。
+        少任何一条就安静地什么都不做 —— 自动功能不该在条件不满足时弹窗报错。
+        """
+        if not core_config.flag(self._cfg, 'auto_push_after_save'):
+            return
+        if self._push_busy or self._account is None or self._current is None:
+            return
+        group = self._current_group()
+        if group is None or not group.get('repo'):
+            return
+        if not core_config.is_managed(self._cfg, self._current):
+            return
+
+        now = time.monotonic()
+        if now - self._last_auto_push < self.AUTO_PUSH_INTERVAL:
+            return
+        self._last_auto_push = now
+        self.do_push(group, silent=True)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._dirty and self._current is not None:
@@ -840,12 +876,11 @@ class FreePushWindow(QWidget):
         self._refresh_all()
         return dlg.group
 
-    def do_push(self, group: dict) -> None:
+    def do_push(self, group: dict, *, silent: bool = False) -> None:
         """推送分三步走：**先看远端** → 本地整理 → 用户确认 → 提交并推送。
 
-        第一步（检查远端）是这一版新加的：如果远端已经有本地没有的提交，
-        直接推会被 GitHub 以「非快进」拒绝 —— 那个报错对写笔记的人来说
-        完全读不懂。不如提前发现，把用户引到「先拉取」这条正确的路上。
+        第一步（检查远端）可以在设置里关掉；第三步（确认层）也可以在设置里关掉。
+        ``silent=True`` 是「保存后自动推送」触发的：整条链路都不弹任何对话框。
 
         后两步都要后台跑：整理要起十来个 git 进程、读写成堆文件，
         放在界面线程上就是「点了 Push 之后整窗僵住两三秒」。
@@ -855,12 +890,27 @@ class FreePushWindow(QWidget):
         self._push_log_lines = []
         self._push_busy = True
         self._busy_kind = 'push'
+        self._push_silent = silent
         self._push_group = group          # 异步链路要一路用回同一个分组
+
+        if not core_config.flag(self._cfg, 'check_remote_before_push'):
+            self._stage_group(group)      # 关了远端检测 → 直接整理
+            return
+
         self._refresh_sync()
         self.panel.set_progress('checking')
         token = self._account.token if self._account else ''
         worker = RemoteCheckWorker(group, token=token, on_log=self._push_log)
         worker.done.connect(self._on_remote_checked)
+        start_worker(worker)
+
+    def _stage_group(self, group: dict) -> None:
+        """把当前内容整理进工作区并暂存（不联网）。"""
+        self._refresh_sync()
+        self.panel.set_progress('preparing')
+        worker = StageWorker(group, account=account_mod.info(),
+                             on_log=self._push_log)
+        worker.done.connect(self._on_stage_done)
         start_worker(worker)
 
     def _on_remote_checked(self, info: dict) -> None:
@@ -882,6 +932,10 @@ class FreePushWindow(QWidget):
             self._busy_kind = None
             self.panel.set_progress(None)
             self._refresh_all()
+            if self._push_silent:
+                # 自动推送时不能弹窗打断打字：安静地不做，用户手动点推送时
+                # 还会看到同样的提示。右栏此刻显示「有改动待推送」，是诚实的。
+                return
             if ask(self, '远端有新的改动',
                    f'GitHub 上已经有 {behind} 个提交是本地没有的。\n\n'
                    '直接推送会被 GitHub 拒绝 —— 它不允许覆盖别处的改动。'
@@ -890,11 +944,7 @@ class FreePushWindow(QWidget):
                 self.on_pull()
             return
 
-        self.panel.set_progress('preparing')
-        worker = StageWorker(group, account=account_mod.info(),
-                             on_log=self._push_log)
-        worker.done.connect(self._on_stage_done)
-        start_worker(worker)
+        self._stage_group(group)
 
     def _on_stage_done(self, staged) -> None:
         """整理完成：要么直接失败，要么弹确认层让用户过目这次要推什么。"""
@@ -906,6 +956,8 @@ class FreePushWindow(QWidget):
             return
         if not staged.has_changes:
             self._refresh_all()
+            if self._push_silent:
+                return        # 自动推送碰上「没变化」是常态，别弹框
             # 文案写死在这里，**不要**用 staged.message ——
             # 整理成功但没有变更时，那个字段是空的（stage_group 只在失败分支
             # 填它），照搬过来就是一个只有图标和 OK 的空框，等于什么也没说。
@@ -915,16 +967,24 @@ class FreePushWindow(QWidget):
             return
 
         group = self._push_group or self._current_group() or {}
-        dlg = PushDialog(group, staged, self)
-        if dlg.exec() != QDialog.Accepted:
-            self._refresh_all()
-            return
+
+        # 确认层可以在设置里关掉；自动推送（silent）时一律跳过 ——
+        # 用户正在打字，这时弹一个「确认推送」的框只会碍事。
+        if core_config.flag(self._cfg, 'confirm_before_push') and not self._push_silent:
+            dlg = PushDialog(group, staged, self)
+            if dlg.exec() != QDialog.Accepted:
+                self._refresh_all()
+                return
+            message, keep = dlg.message, dlg.keep
+        else:
+            message = ''          # 空消息 → finalize_push 用默认提交信息
+            keep = None           # 不取消任何勾选，全部推
 
         token = self._account.token if self._account else ''
         self._push_busy = True
         self._refresh_sync()
         self.panel.set_progress('pushing')
-        worker = PushWorker(group, staged, message=dlg.message, keep=dlg.keep,
+        worker = PushWorker(group, staged, message=message, keep=keep,
                             token=token)
         worker.done.connect(self._on_push_done)
         start_worker(worker)
@@ -942,7 +1002,7 @@ class FreePushWindow(QWidget):
             # 成功：按钮先亮成绿色，停一下再回落到「已是最新」
             self.panel.set_push_state('success', text=f'已推送 {result.commit}')
             QTimer.singleShot(1800, self._refresh_all)
-            if result.warnings:
+            if result.warnings and not self._push_silent:
                 notice(self, '推送完成（有提醒）',
                        result.message + '\n\n'
                        + '\n'.join(f'· {w}' for w in result.warnings),
@@ -964,6 +1024,10 @@ class FreePushWindow(QWidget):
         text = message
         if warnings:
             text += '\n\n' + '\n'.join(f'· {w}' for w in warnings)
+        if self._push_silent:
+            # 自动推送失败不打断用户：右栏状态卡片已经写着失败原因、
+            # 状态栏也变红了，比在他打字时弹一个框更合适。
+            return
         notice(self, '推送失败',
                text + '\n\n改动已保存在本地，不会丢失。修好后可以直接重试。',
                kind='error',
@@ -1202,34 +1266,62 @@ class FreePushWindow(QWidget):
         dlg.exec()
 
     def open_settings(self) -> None:
-        dlg = QDialog(self)
-        dlg.setWindowTitle('设置')
-        dlg.setFixedSize(480, 300)
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(14)
-
-        title = QLabel('设置')
-        title.setStyleSheet(f'color: {theme.TEXT_STRONG}; font-size: 15px; font-weight: 600;')
-        lay.addWidget(title)
-
-        body = QLabel(
-            '本阶段只跑通了编辑器本体，设置项会在接入 GitHub 之后开放：\n\n'
-            '· GitHub 账号（授权 / 撤销）\n'
-            '· 受管理的文件夹（解除绑定）\n'
-            '· 推送行为：推送前确认提交信息 / 保存后自动推送 / 推送前检测远端改动\n\n'
-            f'配置文件目录：{core_config.CONFIG_DIR}')
-        body.setWordWrap(True)
-        body.setStyleSheet(f'color: {theme.TEXT_MUTED}; font-size: {theme.FS_UI}px;')
-        lay.addWidget(body, 1)
-
-        from PySide6.QtWidgets import QPushButton
-        ok = QPushButton('知道了')
-        ok.setObjectName('PushButton')
-        ok.setFixedHeight(36)
-        ok.clicked.connect(dlg.accept)
-        lay.addWidget(ok)
+        """设置页（设计稿 V3-09）。四张卡片：账号 / 受管理的文件夹 / 推送行为 / 关于。"""
+        dlg = SettingsDialog(self._cfg, self._account,
+                             core_config.groups(self._cfg), parent=self)
+        self._center_dialog(dlg)
+        dlg.account_requested.connect(self.open_account)
+        dlg.unbind_requested.connect(self._unbind_group)
+        dlg.flags_changed.connect(self._on_flags_changed)
         dlg.exec()
+        self._refresh_all()
+
+    def _unbind_group(self, group_id: str) -> None:
+        """解除某个文件夹与仓库的绑定。
+
+        只动配置，**不碰任何文件** —— 笔记、本地工作区、GitHub 上的内容
+        全都留在原地。这是刻意的最小动作：解除绑定是个行政操作，
+        不该有任何破坏性后果。
+        """
+        group = core_config.group_by_id(self._cfg, group_id)
+        if group is None:
+            return
+        name = str(group.get('name') or group_id)
+        repo = str(group.get('repo') or '')
+        count = len(core_config.managed_names(group))
+        target = f'https://github.com/{repo}' if repo else '（还没关联仓库）'
+
+        if not ask(self, f'解除「{name}」的绑定？',
+                   f'解除之后，这个文件夹里的 {count} 个文件不再同步到 {target}。\n\n'
+                   '· 笔记文件本身不会被删除，一个都不动\n'
+                   '· GitHub 上已经推上去的内容也不会被删除\n'
+                   '· 只是这个软件从此不再管它\n\n'
+                   '以后想重新纳入，再走一次「纳入 GitHub 管理」就行。',
+                   ok_text='解除绑定', danger=True):
+            return
+
+        if not core_config.remove_group(self._cfg, group_id):
+            return
+        try:
+            core_config.save(self._cfg)
+        except OSError as exc:
+            notice(self, '没能保存配置', str(exc), kind='error')
+            return
+
+        self._refresh_all()
+        ws = core_config.workspace_dir(group)
+        notice(self, '已解除绑定',
+               f'「{name}」不再同步，笔记文件都还在原处。\n\n'
+               f'本地工作区（git 中转区）仍保留在：\n{ws}\n\n'
+               '确认不需要了可以手动删掉这个目录。',
+               kind='success')
+
+    def _on_flags_changed(self) -> None:
+        """设置里的开关变了 —— 立刻让界面反映新行为。"""
+        self._refresh_all()
+        if core_config.flag(self._cfg, 'auto_push_after_save'):
+            # 刚打开这个开关时不该被 90 秒节流挡住，立刻允许一次
+            self._last_auto_push = 0.0
 
     def find_in_file(self) -> None:
         """Ctrl+F：在当前这一篇里找词（内嵌查找条）。

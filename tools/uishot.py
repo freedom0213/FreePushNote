@@ -365,6 +365,26 @@ def main() -> int:
         produced.append(p)
         dlg.reject()
 
+    def shoot_settings() -> None:
+        """设置页（V3-09）：账号 / 受管理的文件夹 / 推送行为 / 关于 四张卡片。"""
+        from app import account as account_mod
+        from app.widgets.settingsdialog import SettingsDialog
+
+        win._refresh_all()
+        # 喂一个假分组，让「受管理的文件夹」卡片有东西可看
+        demo = {'id': 'shotgrp', 'name': 'Java八股笔记',
+                'folder': r'C:\Users\freedom\Desktop\Java笔记',
+                'repo': 'freedom0213/Java-BAGU-notes', 'branch': 'main',
+                'files': ['Java八股.txt', 'Redis补充.txt', 'MySQL锁.txt']}
+        dlg = SettingsDialog(win._cfg, account_mod.session(), [demo], parent=win)
+        dlg.setModal(False)
+        dlg.show()
+        app.processEvents()
+        p = out_dir / 'ui_24_settings.png'
+        dlg.grab().save(str(p))
+        produced.append(p)
+        dlg.reject()
+
     def run() -> None:
         shoot('ui_01_empty.png')                    # 空态
 
@@ -389,6 +409,7 @@ def main() -> int:
         shoot_new_features()
         shoot_notice_and_diff()
         shoot_pull()
+        shoot_settings()
 
         dlg = GitHubAuthDialog(win)
         dlg.setModal(False)

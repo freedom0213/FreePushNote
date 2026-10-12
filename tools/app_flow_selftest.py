@@ -537,6 +537,171 @@ def _test_pull_ui(win) -> None:
     check('文件没关联仓库时不进入拉取流程', not win._push_busy)
 
 
+def _test_settings_ui(win, app) -> None:
+    """[21] 设置页与推送行为开关（重点是开关**真的改变行为**）。"""
+    print('\n[21] 设置页与推送行为开关')
+    import app.window as window_mod
+    from app.widgets.settingsdialog import SettingsDialog
+
+    # ── 配置层：默认值与读写 ──
+    cfg = config.blank_config()
+    defaults = {k: config.flag(cfg, k) for k in config.TOGGLE_KEYS}
+    check('三个开关的默认值符合预期',
+          defaults == {'confirm_before_push': True,
+                       'auto_push_after_save': False,
+                       'check_remote_before_push': True}, str(defaults))
+    config.set_flag(cfg, 'auto_push_after_save', True)
+    check('写入后读得回来', config.flag(cfg, 'auto_push_after_save') is True)
+    cfg['defaults']['confirm_before_push'] = 'false'    # 手改配置文件的情形
+    check('配置里写成字符串也认得出', config.flag(cfg, 'confirm_before_push') is False)
+    try:
+        config.set_flag(cfg, 'not_a_flag', True)
+        check('拒绝写入未知开关', False)
+    except KeyError:
+        check('拒绝写入未知开关', True)
+
+    # ── 设置页渲染 ──
+    win._account = account_mod.session()
+    groups = config.groups(win._cfg)
+    dlg = SettingsDialog(win._cfg, win._account, groups, parent=win)
+    texts = ' | '.join(w.text() for w in dlg.findChildren(QLabel))
+    check('四张卡片的小标题都在',
+          all(k in texts for k in ('账号', '受管理的文件夹', '推送行为', '关于')),
+          texts[:160])
+    check('三个开关的文案都在',
+          all(config.TOGGLE_LABELS[k][0] in texts
+              for k in config.TOGGLE_KEYS))
+    check('关于卡里有版本号', config.APP_VERSION in texts, texts[-160:])
+    check('开关控件齐备', len(dlg._checks) == len(config.TOGGLE_KEYS),
+          str(sorted(dlg._checks)))
+    check('开关初始状态取自配置',
+          dlg._checks['auto_push_after_save'].isChecked() is False)
+
+    before = config.flag(win._cfg, 'auto_push_after_save')
+    dlg._checks['auto_push_after_save'].click()
+    check('点开关立刻写进配置',
+          config.flag(win._cfg, 'auto_push_after_save') is (not before))
+    dlg._checks['auto_push_after_save'].click()          # 还原
+    check('再点一次能还原',
+          config.flag(win._cfg, 'auto_push_after_save') is before)
+
+    # ── 开关真的改变行为 ①：远端检测 ──
+    group = groups[0] if groups else None
+    if group is None:
+        check('（跳过：没有分组可供推送分支测试）', True)
+    else:
+        started: list[str] = []
+        real_start = window_mod.start_worker
+        window_mod.start_worker = (
+            lambda w: started.append(type(w).__name__) or w)
+        try:
+            config.set_flag(win._cfg, 'check_remote_before_push', False)
+            win._push_busy = False
+            win.do_push(group)
+            check('关掉「推送前检测远端」后不再启动检查',
+                  'RemoteCheckWorker' not in started, str(started))
+            check('而是直接进入本地整理', 'StageWorker' in started, str(started))
+
+            started.clear()
+            win._push_busy = False
+            config.set_flag(win._cfg, 'check_remote_before_push', True)
+            win.do_push(group)
+            check('打开时会先检测远端', 'RemoteCheckWorker' in started, str(started))
+        finally:
+            window_mod.start_worker = real_start
+            win._push_busy = False
+            config.set_flag(win._cfg, 'check_remote_before_push', True)
+
+        # ── 开关真的改变行为 ②：确认层 ──
+        from app.widgets.pushdialog import PushDialog
+
+        opened: list[int] = []
+        started2: list[str] = []
+        real_exec = PushDialog.exec
+        PushDialog.exec = lambda self: opened.append(1) or 0     # 0 = 用户取消
+        window_mod.start_worker = (
+            lambda w: started2.append(type(w).__name__) or w)
+        try:
+            staged = pipeline.StageResult(
+                ok=True, workspace=pipeline.workspace_dir(group),
+                files=['第一篇.txt'],
+                changes=[{'path': '第一篇.txt', 'added': 1, 'removed': 0}],
+                note_paths={'第一篇.txt': ['第一篇.txt']}, has_changes=True)
+            win._push_group = group
+            win._push_silent = False
+
+            config.set_flag(win._cfg, 'confirm_before_push', False)
+            win._on_stage_done(staged)
+            check('关掉确认层后不再弹确认窗口', not opened, str(opened))
+            check('直接进入提交推送', 'PushWorker' in started2, str(started2))
+
+            opened.clear()
+            started2.clear()
+            win._push_busy = False
+            config.set_flag(win._cfg, 'confirm_before_push', True)
+            win._on_stage_done(staged)
+            check('打开确认层会先弹窗', bool(opened), str(opened))
+            check('用户在窗口里取消就不推送', 'PushWorker' not in started2,
+                  str(started2))
+        finally:
+            PushDialog.exec = real_exec
+            window_mod.start_worker = real_start
+            config.set_flag(win._cfg, 'confirm_before_push', True)
+            win._push_busy = False
+
+        # ── 开关真的改变行为 ③：保存后自动推送（静默 + 节流）──
+        names = config.managed_names(group)
+        if names:
+            started3: list[str] = []
+            window_mod.start_worker = (
+                lambda w: started3.append(type(w).__name__) or w)
+            try:
+                config.set_flag(win._cfg, 'auto_push_after_save', True)
+                config.set_flag(win._cfg, 'confirm_before_push', True)
+                win._account = account_mod.session()
+                win._push_busy = False
+                win._last_auto_push = 0.0
+                win.load_path(str(Path(str(group['folder'])) / names[0]))
+                win._maybe_auto_push()
+                check('开启后保存会触发自动推送', bool(started3), str(started3))
+                check('自动推送是静默的（不弹确认层）', win._push_silent is True)
+
+                started3.clear()
+                win._push_busy = False
+                win._maybe_auto_push()
+                check('节流生效：短时间内不重复推送', not started3, str(started3))
+            finally:
+                window_mod.start_worker = real_start
+                win._push_busy = False
+                config.set_flag(win._cfg, 'auto_push_after_save', False)
+
+
+def _test_unbind_group(win) -> None:
+    """[22] 解除绑定：只动配置，不碰文件。放在最后 —— 它会把分组删掉。"""
+    print('\n[22] 解除绑定分组')
+    groups = config.groups(win._cfg)
+    if not groups:
+        check('（跳过：没有分组）', True)
+        return
+
+    gid = str(groups[0].get('id'))
+    folder = Path(str(groups[0].get('folder') or ''))
+    before_count = len(groups)
+    note = folder / config.managed_names(groups[0])[0]
+    existed = note.is_file()
+
+    win._unbind_group(gid)
+
+    after = config.groups(win._cfg)
+    check('分组从配置里移除了', len(after) == before_count - 1,
+          f'{before_count} → {len(after)}')
+    check('配置文件里也落盘了',
+          all(g.get('id') != gid for g in config.load().get('groups', [])))
+    check('笔记文件一个都没动', note.is_file() is existed)
+    check('左栏不再列出这个分组', win.sidebar.managed_tree.topLevelItemCount()
+          == len(after))
+
+
 def main() -> int:  # noqa: C901
     print('=' * 66)
     print('FreePushNote 界面接线自测（offscreen，不联网）')
@@ -802,7 +967,9 @@ def main() -> int:  # noqa: C901
     _test_notice(app)
     _test_diff_preview(win)
     _test_pull_ui(win)
-    _test_account_page(win, app)   # 放最后：退出登录会清掉账号
+    _test_settings_ui(win, app)
+    _test_account_page(win, app)   # 退出登录会清掉账号
+    _test_unbind_group(win)        # 放最后：它会删掉分组
 
     print('\n' + '=' * 66)
     print(f'通过 {PASS} / {PASS + FAIL}')

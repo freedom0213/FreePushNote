@@ -64,6 +64,9 @@ BACKUPS_DIR = CONFIG_DIR / 'backups'
 
 SCHEMA_VERSION = 2
 
+#: 软件版本（设置页「关于」里显示）。尚未打包分发，按 0.x 走。
+APP_VERSION = '0.1.0'
+
 #: 允许纳入管理的扩展名。**刻意只放文本类** —— 这个软件的存在意义就是 txt。
 NOTE_EXTENSIONS = ('.txt', '.md')
 
@@ -75,6 +78,30 @@ DEFAULTS: dict = {
     # GitHub Pages 默认就是从根目录发布，这样用户不用再改仓库设置。
     'docs_dir': '',
     'commit_template': '更新 {target}',
+    # ── 推送行为（设置页可改）──
+    #: 推送前弹确认层，让你先看清这次会改什么。关掉就一键直推。
+    'confirm_before_push': True,
+    #: 保存落盘后自动推送。**默认关** —— 推送要联网，不该在你打字时偷偷发生。
+    'auto_push_after_save': False,
+    #: 推送前先读一次远端，滞后就引导先拉取（避免撞非快进拒绝）。
+    'check_remote_before_push': True,
+}
+
+#: 布尔开关的键名。设置页据此渲染，界面与配置不各写一份清单。
+TOGGLE_KEYS: tuple[str, ...] = (
+    'confirm_before_push',
+    'auto_push_after_save',
+    'check_remote_before_push',
+)
+
+#: 开关的展示文案（设置页与文档共用同一份措辞）
+TOGGLE_LABELS: dict[str, tuple[str, str]] = {
+    'confirm_before_push': ('推送前先确认提交信息',
+                            '推送前先给你看这次会改哪些地方，确认后才提交'),
+    'auto_push_after_save': ('保存后自动推送',
+                             '保存落盘后自动同步到 GitHub（不会弹确认层）'),
+    'check_remote_before_push': ('推送前检测远端改动',
+                                 '先看远端有没有本地没有的提交，避免推送被拒绝'),
 }
 
 _REPO_RE = re.compile(r'^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$')
@@ -95,6 +122,26 @@ def defaults_of(cfg: dict) -> dict:
     merged = dict(DEFAULTS)
     merged.update(cfg.get('defaults') or {})
     return merged
+
+
+def flag(cfg: dict, key: str) -> bool:
+    """读一个布尔开关。
+
+    容错：手改过配置文件的人可能写成 ``"false"`` / ``"0"`` 这类字符串，
+    这里照样按布尔理解，而不是因为 Python 里非空字符串恒为真而误判。
+    """
+    value = defaults_of(cfg).get(key, DEFAULTS.get(key))
+    if isinstance(value, str):
+        return value.strip().lower() not in ('', '0', 'false', 'no', 'off')
+    return bool(value)
+
+
+def set_flag(cfg: dict, key: str, value: bool) -> dict:
+    """写一个布尔开关（落到 ``defaults`` 段）。只允许写已知的开关键。"""
+    if key not in TOGGLE_KEYS:
+        raise KeyError(f'未知的开关：{key}')
+    cfg.setdefault('defaults', {})[key] = bool(value)
+    return cfg
 
 
 # ───────────────────────────── 读写 ─────────────────────────────
