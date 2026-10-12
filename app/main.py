@@ -22,6 +22,34 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app import theme  # noqa: E402
 from app.window import FreePushWindow  # noqa: E402
+from core import config as core_config  # noqa: E402
+
+
+def _install_crash_log() -> None:
+    """把未捕获的异常写进日志文件。
+
+    打包成 exe 之后**没有控制台**，异常会静默消失 —— 用户看到的只是
+    「双击了，窗口闪一下就没了」，然后只能说「打不开」，谁也查不出原因。
+    留一份日志到 ``~/.pushnote/logs/`` 是给这种情况准备的关键线索。
+
+    仍然调用默认的 excepthook：开发时该在终端里看到的还是要看到。
+    """
+    import traceback
+    from datetime import datetime
+
+    def hook(exc_type, exc, tb) -> None:
+        try:
+            log_dir = core_config.CONFIG_DIR / 'logs'
+            log_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            (log_dir / f'crash-{stamp}.log').write_text(
+                ''.join(traceback.format_exception(exc_type, exc, tb)),
+                encoding='utf-8')
+        except Exception:       # noqa: BLE001 - 记日志本身绝不能把程序带崩
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = hook
 
 
 def build_app(argv: list[str] | None = None) -> QApplication:
@@ -44,6 +72,7 @@ def build_app(argv: list[str] | None = None) -> QApplication:
 
 
 def main() -> int:
+    _install_crash_log()
     app = build_app()
     window = FreePushWindow()
     window.show()

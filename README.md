@@ -62,7 +62,6 @@ FreePushNote 要做的就是把这个过程压成**一个按钮**：它把 git�
 
 ## 还没做
 
-- **打包分发**：现在只能从源码运行，还没有免安装 exe
 - **未纳管文件提醒**：新建了笔记但忘了勾选纳管时，目前不会主动提示
 - 界面形象（规划中）
 
@@ -107,6 +106,18 @@ HTTP 用标准库 `urllib`，加密直接 `ctypes` 调系统 API。不引入 `re
 | 依赖 | 运行时仅 PySide6 |
 | 平台 | Windows（无边框窗口、DPAPI、任务栏行为都针对 Windows 实现） |
 
+## 下载与使用
+
+在 [Releases](https://github.com/freedom0213/FreePushNote/releases) 页面下载，两个文件二选一：
+
+| 文件 | 适合 | 说明 |
+|---|---|---|
+| `FreePushNote-v0.1.0-win64.zip` | **推荐** | 解压后双击里面的 `FreePushNote.exe`。启动快 |
+| `FreePushNote-v0.1.0.exe` | 图省事 | 单个文件，双击就跑。代价是每次启动都要先解压一次，慢几秒 |
+
+> 首次运行时 Windows 可能弹出「已保护你的电脑 / 未知发布者」——所有**没有代码签名**
+> 的免费软件都会这样，点「更多信息」→「仍要运行」即可。
+
 ## 从源码运行
 
 ```bat
@@ -115,13 +126,28 @@ python -m venv .venv
 run.bat
 ```
 
-打包成免安装 exe 尚未做。
+## 打包
+
+```bat
+.venv\Scripts\python.exe -m pip install pyinstaller
+.venv\Scripts\python.exe tools\build_exe.py
+```
+
+产物落在 `dist/`：文件夹版（自动压成 zip）与单文件版，文件名带版本号——
+版本号只需改一处：`core/config.py` 里的 `APP_VERSION`。
+
+图标由 `tools/make_icon.py` 从 `assets/icon/source.jpg` 生成（需要 Pillow，
+只在生成图标时用到）：
+
+```bat
+python tools\make_icon.py assets\icon\source.jpg --out assets\icon
+```
 
 ## 项目状态
 
 早期开发阶段。**编辑器、GitHub 认证、推送、Pull、差异查看、设置页已经跑通端到端流程**，但打包分发还没做，界面细节也在持续调整。
 
-自测共 4 套、**433 项**，全部离线运行（用本地 bare 仓库充当远端），覆盖推送链路、三方合并、编码转换、界面接线：
+自测共 4 套、**440 项**，全部离线运行（用本地 bare 仓库充当远端），覆盖推送链路、三方合并、编码转换、界面接线：
 
 ```bat
 .venv\Scripts\python.exe tools\selftest.py           # 核心工具
