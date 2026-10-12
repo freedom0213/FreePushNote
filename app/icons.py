@@ -233,3 +233,20 @@ def app_icon() -> QIcon:
         if not loaded.isNull():
             return loaded
     return icon('app', C_SECOND, 16, second=C_PRIMARY)
+
+
+def app_pixmap(size: int = 16, dpr: float = 2.0) -> QPixmap:
+    """应用图标的位图 —— 给标题栏这类要 QPixmap 的地方用。
+
+    走**同一个** dpr 约定（渲染 size×dpr 再交给 Qt 缩放），
+    这样位图图标与矢量图标在界面上看起来一样大、一样清。
+
+    ⚠️ 别图省事直接写 ``icons.app_icon().pixmap(16, 16)``：那样在高分屏上
+    只会拿到 16 物理像素，被拉大到 24 就发虚。
+    """
+    px = app_icon().pixmap(int(size * dpr), int(size * dpr))
+    if px.isNull():
+        px = QPixmap(int(size * dpr), int(size * dpr))
+        px.fill(Qt.transparent)
+    px.setDevicePixelRatio(dpr)
+    return px

@@ -730,6 +730,12 @@ def _test_app_icon(win) -> None:
     finally:
         icons_mod._asset_path = real
 
+    px = icons_mod.app_pixmap(16)
+    check('app_pixmap 出图正常', not px.isNull())
+    check('app_pixmap 按 dpr 渲染（高分屏不发虚）',
+          px.width() >= 16 and abs(px.devicePixelRatio() - 2.0) < 0.01,
+          f'{px.width()}px @ dpr={px.devicePixelRatio()}')
+
 
 def main() -> int:  # noqa: C901
     print('=' * 66)

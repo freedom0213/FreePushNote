@@ -47,7 +47,7 @@ class TitleBar(QFrame):
         left.setSpacing(10)
 
         logo = QLabel()
-        logo.setPixmap(icons.icon('app', '#9D9D9D', 16, second=theme.PRIMARY).pixmap(16, 16))
+        logo.setPixmap(icons.app_pixmap(16))
         logo.setFixedSize(16, 16)
         left.addWidget(logo)
 
