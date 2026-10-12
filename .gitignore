@@ -50,3 +50,8 @@ FreePushNote-项目现状.md
 #     python tools/make_icon.py assets/icon/source.jpg
 assets/icon/app.png
 
+
+# ────────────── PyInstaller 构建产物 ──────────────
+# .spec 是 PyInstaller 按命令行参数生成的构建描述，每次打包都会重写。
+# 打包参数以 tools/build_exe.py 为准，这里不该再存一份，否则两处会打架。
+*.spec
