@@ -4,7 +4,8 @@
 
 用记事本的手感写东西，用 GitHub 保存和发布；不需要懂 git，也不需要为「我只想改一个错别字」走完一整套 `add / commit / push`。
 
-> 项目正在开发中，尚未打包分发。当前只能从源码运行，配置格式与界面仍可能调整。
+> 早期开发阶段：主流程（写作 / 发布 / 同步 / 设置）已跑通，可直接下载使用；
+> 但配置格式与界面细节仍可能调整。详见 [Releases](https://github.com/freedom0213/FreePushNote/releases)。
 
 ---
 
@@ -136,6 +137,21 @@ run.bat
 产物落在 `dist/`：文件夹版（自动压成 zip）与单文件版，文件名带版本号——
 版本号只需改一处：`core/config.py` 里的 `APP_VERSION`。
 
+`dist/` 是构建目录，**重新打包会覆盖它**，不要把它当程序的安装位置。
+要装到自己机器上，把产物复制到固定目录（例如 `D:\FreePushNote-v0.1.0`），
+再建一个桌面快捷方式：
+
+```bat
+.venv\Scripts\python.exe tools\make_shortcut.py --exe D:\FreePushNote-v0.1.0\FreePushNote.exe
+```
+
+打包时如果程序正开着，`dist\FreePushNote\FreePushNote.exe` 会被占用，
+这时把产物指到别处即可（不必关掉程序）：
+
+```bat
+.venv\Scripts\python.exe tools\build_exe.py --out %TEMP%\fp-dist
+```
+
 图标由 `tools/make_icon.py` 从 `assets/icon/source.jpg` 生成（需要 Pillow，
 只在生成图标时用到）：
 
@@ -145,9 +161,9 @@ python tools\make_icon.py assets\icon\source.jpg --out assets\icon
 
 ## 项目状态
 
-早期开发阶段。**编辑器、GitHub 认证、推送、Pull、差异查看、设置页已经跑通端到端流程**，但打包分发还没做，界面细节也在持续调整。
+早期开发阶段。**编辑器、GitHub 认证、推送、Pull、差异查看、设置页已经跑通端到端流程**，也已能打包分发给别人用；界面细节仍在持续调整。
 
-自测共 4 套、**440 项**，全部离线运行（用本地 bare 仓库充当远端），覆盖推送链路、三方合并、编码转换、界面接线：
+自测共 4 套、**442 项**，全部离线运行（用本地 bare 仓库充当远端），覆盖推送链路、三方合并、编码转换、界面接线：
 
 ```bat
 .venv\Scripts\python.exe tools\selftest.py           # 核心工具

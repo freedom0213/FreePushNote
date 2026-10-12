@@ -63,7 +63,7 @@ def version_file(path: Path, version: str) -> None:
 """, encoding='utf-8')
 
 
-def build(*, onefile: bool) -> None:
+def build(*, onefile: bool, out_dir: Path = DIST) -> None:
     """跑一遍 PyInstaller。"""
     mode = '单文件（onefile）' if onefile else '文件夹（onedir）'
     print(f'\n{"=" * 64}\n打包：{mode}\n{"=" * 64}', flush=True)
@@ -78,7 +78,7 @@ def build(*, onefile: bool) -> None:
         '--name', name,
         '--icon', str(ICON),
         '--version-file', str(vf),
-        '--distpath', str(DIST), '--workpath', str(BUILD),
+        '--distpath', str(out_dir), '--workpath', str(BUILD),
         # 资源：站点模板 + 本地化的前端资源（离线也能生成文档站），以及应用图标。
         # 刻意逐个列出而不是整个 assets/ —— 那里还躺着 1.4MB 的母版图
         # （source.jpg / app.png），运行时一个都用不到。
@@ -113,7 +113,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description='打包 FreePushNote')
     ap.add_argument('--onefile', action='store_true', help='只打单文件 exe')
     ap.add_argument('--onedir', action='store_true', help='只打文件夹版 zip')
+    ap.add_argument('--out', default=str(DIST),
+                    help='输出目录（默认 dist）。产物正在运行时会锁住 dist 里的 exe，'
+                         '这时指到别处即可，不必关掉程序')
     args = ap.parse_args()
+    out_dir = Path(args.out).resolve()
     do_onedir = args.onedir or not (args.onefile or args.onedir)
     do_onefile = args.onefile or not (args.onefile or args.onedir)
 
@@ -121,22 +125,22 @@ def main() -> int:
         raise SystemExit(f'缺少图标文件：{ICON}\n先跑 tools/make_icon.py 生成它。')
 
     version = config.APP_VERSION
-    print(f'FreePushNote v{version}  ·  输出目录 {DIST}')
-    DIST.mkdir(parents=True, exist_ok=True)
+    print(f'FreePushNote v{version}  ·  输出目录 {out_dir}')
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     made: list[Path] = []
 
     if do_onedir:
-        build(onefile=False)
-        folder = DIST / 'FreePushNote'
-        zip_path = DIST / f'FreePushNote-v{version}-win64.zip'
+        build(onefile=False, out_dir=out_dir)
+        folder = out_dir / 'FreePushNote'
+        zip_path = out_dir / f'FreePushNote-v{version}-win64.zip'
         print(f'压缩 → {zip_path.name}', flush=True)
         zip_dir(folder, zip_path)
         made.append(zip_path)
 
     if do_onefile:
-        build(onefile=True)
-        exe = DIST / f'FreePushNote-v{version}.exe'
+        build(onefile=True, out_dir=out_dir)
+        exe = out_dir / f'FreePushNote-v{version}.exe'
         if not exe.is_file():
             raise SystemExit(f'预期产物不存在：{exe}')
         made.append(exe)
