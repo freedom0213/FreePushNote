@@ -39,6 +39,7 @@ from app import account as account_mod  # noqa: E402
 from app.main import build_app  # noqa: E402
 from app.widgets.diffdialog import DiffDialog  # noqa: E402
 from app.widgets.managedialog import ManageFolderDialog  # noqa: E402
+from app.widgets.newfilesdialog import NewFilesDialog  # noqa: E402
 from app.widgets.notice import NoticeDialog  # noqa: E402
 from app.widgets.pushdialog import PushDialog  # noqa: E402
 from app.widgets.sidebar import _close_rect  # noqa: E402
@@ -49,6 +50,10 @@ from app.window import FreePushWindow  # noqa: E402
 # 这是唯一需要拦的地方（QMessageBox 已经不用了）。
 NoticeDialog.exec = lambda self: 1          # 1 == QDialog.Accepted
 DiffDialog.exec = lambda self: 0            # 差异窗口：看一眼就关，不阻塞
+# S-02 新文件提示：默认「纳入并推送」但一个都没勾 = 什么都不改、流程继续。
+# 不这么拦，推送链路上的用例会弹真模态框把脚本挂死。
+# 专门测 S-02 的用例会临时换成自己的假 exec。
+NewFilesDialog.exec = lambda self: 1
 
 PASS = 0
 FAIL = 0
@@ -676,6 +681,155 @@ def _test_settings_ui(win, app) -> None:
                 config.set_flag(win._cfg, 'auto_push_after_save', False)
 
 
+def _test_new_files_ui(win) -> None:
+    """S-02 面板本身：文案、列表、两个按钮各自的产出（设计稿 2:5）。"""
+    files = [{'name': 'Redis八股.txt', 'mtime': 1759831200.0},
+             {'name': '分布式锁笔记.txt', 'mtime': 1759747800.0}]
+    group = {'id': 'g', 'folder': str(_TMP)}
+    dlg = NewFilesDialog(files, group, win)
+
+    check('标题带上数量', '发现 2 个' in dlg._title.text(), dlg._title.text())
+    texts = ' '.join(w.text() for w in dlg.findChildren(QLabel))
+    check('说明文字与稿子一致',
+          '还没有纳入 GitHub 管理' in texts and '要一起推送吗' in texts)
+    check('补充说明写明「下次不再提示」', '下次不再提示' in texts)
+    check('列出了 2 行', len(dlg._rows) == 2, str(list(dlg._rows)))
+    check('默认全部勾选', all(r.check.isChecked() for r in dlg._rows.values()))
+    check('行里带了修改时间（mm-dd hh:mm）',
+          dlg._rows['Redis八股.txt']._meta.text().count(':') == 1,
+          dlg._rows['Redis八股.txt']._meta.text())
+    check('两个按钮文案与稿子一致',
+          dlg._btn_include.text() == '纳入并推送'
+          and dlg._btn_managed.text() == '只推已管理的',
+          f'{dlg._btn_managed.text()} / {dlg._btn_include.text()}')
+
+    dlg._rows['Redis八股.txt'].check.setChecked(False)   # 取消勾选一篇
+    dlg._btn_include.click()
+    check('「纳入并推送」→ mode=include', dlg.mode == 'include')
+    check('勾选的进 picked', dlg.picked == ['分布式锁笔记.txt'], str(dlg.picked))
+    check('取消勾选的进 skipped', dlg.skipped == ['Redis八股.txt'], str(dlg.skipped))
+
+    dlg2 = NewFilesDialog(files, group, win)
+    dlg2._btn_managed.click()
+    check('「只推已管理的」→ mode=managed_only', dlg2.mode == 'managed_only')
+    check('它同样记录了勾选状态', len(dlg2.picked) == 2, str(dlg2.picked))
+
+
+def _test_new_files_wiring(win) -> None:
+    """S-02 接线：勾选进白名单、取消进不再提示、关掉面板则中止推送。
+
+    用一个独立的临时文件夹 + 独立分组，免得污染前面用例的文件夹与计数。
+    """
+    base = _TMP / 's02文件夹'
+    base.mkdir(parents=True, exist_ok=True)
+    (base / '已纳管.txt').write_text('a\n', encoding='utf-8')
+    (base / '新笔记A.txt').write_text('b\n', encoding='utf-8')
+    (base / '新笔记B.txt').write_text('c\n', encoding='utf-8')
+
+    g = config.new_group(base)
+    g['id'] = 's02'
+    g['repo'] = 'tester/s02'
+    g['files'] = ['已纳管.txt']
+    config.upsert_group(win._cfg, g)
+    config.save(win._cfg)
+    win._reload_cfg()
+    group = config.group_by_id(win._cfg, 's02')
+
+    real_exec = NewFilesDialog.exec
+    real_stage = win._stage_group
+    staged: list[dict] = []
+    try:
+        win._stage_group = lambda grp: staged.append(grp)   # 不真跑 git
+        win._push_group = group
+        win._push_silent = False
+
+        check('扫出 2 篇未纳管',
+              {f['name'] for f in pipeline.new_files(group)}
+              == {'新笔记A.txt', '新笔记B.txt'},
+              str(pipeline.detect_new_files(group)))
+
+        # ① 直接关掉面板 → 这次不推了，且什么都不改
+        win._push_busy = True
+        NewFilesDialog.exec = lambda self: 0
+        win._after_remote_ok(group)
+        check('关掉面板 = 中止推送，不进入整理',
+              not win._push_busy and not staged)
+        check('关掉面板不改任何清单',
+              config.managed_names(config.group_by_id(win._cfg, 's02'))
+              == ['已纳管.txt'])
+
+        # ② 留 A、取消 B → A 进白名单，B 记入不再提示
+        #    注意默认是**全部勾选**（与设计稿一致：两个复选框都画成勾上的），
+        #    所以这里要显式取消 B，而不是去勾 A。
+        def keep_a_only(self):
+            self._rows['新笔记B.txt'].check.setChecked(False)
+            self._done('include')
+            return 1
+
+        NewFilesDialog.exec = keep_a_only
+        win._push_busy = True
+        win._after_remote_ok(group)
+        grp2 = config.group_by_id(win._cfg, 's02')
+
+        check('勾选的进了白名单',
+              '新笔记A.txt' in config.managed_names(grp2),
+              str(config.managed_names(grp2)))
+        check('未勾选的记入「不再提示」',
+              config.ignored_names(grp2) == ['新笔记B.txt'],
+              str(config.ignored_names(grp2)))
+        check('选择完之后继续走整理（进入推送流程）', len(staged) == 1)
+        check('之后不再为这两篇弹窗',
+              pipeline.new_files(grp2) == [],
+              str(pipeline.detect_new_files(grp2)))
+    finally:
+        NewFilesDialog.exec = real_exec
+        win._stage_group = real_stage
+        config.remove_group(win._cfg, 's02')
+        config.save(win._cfg)
+        win._reload_cfg()
+        win._push_busy = False
+        win._push_group = None
+
+
+def _test_welcome_state(win) -> None:
+    """V3-10 欢迎态：状态驱动 —— 没绑账号 + 没分组 + 没最近文件才出现。"""
+    saved = (win._account, win._recent, win._cfg)
+    try:
+        win._account = None
+        win._recent = []
+        win._cfg = config.blank_config()
+        win._refresh_empty_state()
+        check('什么都没开始时显示欢迎态', win._empty_stack.currentIndex() == 1)
+
+        text = ' '.join(w.text() for w in
+                        win._empty_stack.widget(1).findChildren(QLabel))
+        check('用的是 V3-10 原文',
+              '欢迎使用 FreePushNote' in text
+              and '开始之前需要先做两件事' in text
+              and '绑定 GitHub 账号' in text
+              and '可以随时用手机打开的在线文档站' in text,
+              text[:110])
+
+        win._recent = ['C:/x/一篇.txt']
+        win._refresh_empty_state()
+        check('打开过文件后回到日常空态', win._empty_stack.currentIndex() == 0)
+
+        win._recent = []
+        win._cfg = config.blank_config()
+        config.upsert_group(win._cfg, config.new_group(_TMP))
+        win._refresh_empty_state()
+        check('纳管过文件夹后不再显示欢迎态',
+              win._empty_stack.currentIndex() == 0)
+
+        win._cfg = config.blank_config()
+        win._account = account_mod.session()
+        win._refresh_empty_state()
+        check('绑过账号后不再显示欢迎态', win._empty_stack.currentIndex() == 0)
+    finally:
+        win._account, win._recent, win._cfg = saved
+        win._refresh_all()
+
+
 def _test_unbind_group(win) -> None:
     """[22] 解除绑定：只动配置，不碰文件。放在最后 —— 它会把分组删掉。"""
     print('\n[22] 解除绑定分组')
@@ -1003,6 +1157,9 @@ def main() -> int:  # noqa: C901
     _test_diff_preview(win)
     _test_pull_ui(win)
     _test_settings_ui(win, app)
+    _test_new_files_ui(win)
+    _test_new_files_wiring(win)
+    _test_welcome_state(win)
     _test_account_page(win, app)   # 退出登录会清掉账号
     _test_unbind_group(win)        # 放最后：它会删掉分组
     _test_app_icon(win)

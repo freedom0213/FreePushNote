@@ -211,6 +211,33 @@ def test_config_model(folder: Path) -> None:
           set(pipeline.detect_new_files(make_group(folder, 'x/y'))) ==
           {'密码备份.txt', '照片说明.md'})
 
+    # ── S-02：新文件提示要的「带时间 + 排除已忽略」──
+    g_new = make_group(folder, 'x/y')
+    fresh = pipeline.new_files(g_new)
+    check('new_files 带上文件与修改时间',
+          {f['name'] for f in fresh} == {'密码备份.txt', '照片说明.md'}
+          and all(float(f['mtime']) > 0 for f in fresh),
+          str(fresh)[:140])
+    check('旧配置没有 ignored 字段时不报错',
+          config.ignored_names({'files': ['a.txt']}) == [])
+
+    cfg3 = config.blank_config()
+    config.upsert_group(cfg3, g_new)
+    check('add_ignored 写入并可读回',
+          (config.add_ignored(cfg3, 'notes', ['密码备份.txt']) or {}).get('ignored')
+          == ['密码备份.txt'])
+    check('add_ignored 去重且保持顺序',
+          (config.add_ignored(cfg3, 'notes',
+                              ['密码备份.txt', '照片说明.md']) or {}).get('ignored')
+          == ['密码备份.txt', '照片说明.md'])
+    check('被忽略的文件不再出现在 new_files',
+          pipeline.new_files(g_new) == [])
+    check('add_ignored 对不存在的分组返回 None',
+          config.add_ignored(cfg3, 'nope', ['x.txt']) is None)
+    check('忽略的文件仍可能在白名单里（两件事互不干扰）',
+          config.managed_names(g_new) and
+          config.ignored_names(g_new) == ['密码备份.txt', '照片说明.md'])
+
     check('make_group_id 生成 slug',
           config.make_group_id(config.blank_config(), 'Java八股') == 'java')
     check('make_group_id 避免重复', (lambda c: (

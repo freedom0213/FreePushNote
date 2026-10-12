@@ -407,14 +407,24 @@ def push_group(group: dict, *, message: str | None = None,
                          retries=retries, on_log=on_log)
 
 
-def detect_new_files(group: dict) -> list[str]:
+def new_files(group: dict) -> list[dict]:
     """扫描源文件夹，找出「还没纳入管理」的笔记文件（设计稿 S-02）。
 
     解决的是「我明明新建了个 txt，怎么没同步」——用户不会记得自己当初勾了哪些。
+
+    返回 ``[{'name', 'mtime'}, ...]``，刻意**排除两类**：
+    - 已在白名单里的（那是正常推送范围，不算「新发现」）
+    - 用户取消过勾选、明确说过「不再提示」的（见 config.ignored_names）
     """
     managed = set(config.managed_names(group))
-    return [n for n in config.scan_notes(str(group.get('folder') or ''))
-            if n not in managed]
+    ignored = set(config.ignored_names(group))
+    return [f for f in config.scan_notes_detailed(str(group.get('folder') or ''))
+            if f['name'] not in managed and f['name'] not in ignored]
+
+
+def detect_new_files(group: dict) -> list[str]:
+    """只要文件名的便捷版（自测与内部判断用）。"""
+    return [str(f['name']) for f in new_files(group)]
 
 
 def is_pushed(group: dict, name: str) -> bool | None:

@@ -385,8 +385,54 @@ def main() -> int:
         produced.append(p)
         dlg.reject()
 
+    def shoot_newfiles() -> None:
+        """S-02：推送前发现未纳入管理的文件（460px 提示面板）。"""
+        from app.widgets.newfilesdialog import NewFilesDialog
+
+        files = [{'name': 'Redis八股.txt', 'mtime': 1759831200.0},
+                 {'name': '分布式锁笔记.txt', 'mtime': 1759747800.0}]
+        demo = {'id': 'shotgrp', 'name': 'Java八股笔记',
+                'folder': r'C:\Users\freedom\Desktop\Java笔记'}
+        dlg = NewFilesDialog(files, demo, win)
+        dlg.setModal(False)
+        dlg.show()
+        app.processEvents()
+        p = out_dir / 'ui_25_newfiles.png'
+        dlg.grab().save(str(p))
+        produced.append(p)
+        dlg.reject()
+
+    def shoot_welcome() -> None:
+        """V3-10：什么都还没开始时的欢迎态（对比 V3-11 的日常空态）。
+
+        真实第一跑就是这个样子：没账号、没分组、没最近文件。
+        为了截图**诚实**，连配置都临时指向一个空配置 —— 否则左栏右栏会显示
+        「用过之后」的内容，跟欢迎态自相矛盾。
+        """
+        from core import config as cfg_mod
+
+        blank = out_dir / 'shot_blank_config.json'
+        cfg_mod.save(cfg_mod.blank_config(), blank)
+        saved = (win._account, win._recent, win._cfg, win._cfg_stamp,
+                 cfg_mod.CONFIG_PATH)
+        try:
+            cfg_mod.CONFIG_PATH = blank
+            win._account = None
+            win._recent = []
+            win._cfg_stamp = None         # 置空 -> 强制重读，读到那份空配置
+            win._refresh_all()
+            # 左栏「最近打开」不在 _refresh_all 里重建（平时只在开/关文件时变），
+            # 这里得显式喂一次，否则截图会留着上一次的列表。
+            win.sidebar.set_recent(win._recent)
+            shoot('ui_26_welcome.png')
+        finally:
+            (win._account, win._recent, win._cfg, win._cfg_stamp,
+             cfg_mod.CONFIG_PATH) = saved
+            win._refresh_all()
+
     def run() -> None:
-        shoot('ui_01_empty.png')                    # 空态
+        shoot_welcome()                             # 欢迎态（V3-10）
+        shoot('ui_01_empty.png')                    # 日常空态（V3-11）
 
         sample = out_dir / 'ui_sample.txt'
         sample.write_text(SAMPLE, encoding='utf-8', newline='\r\n')
@@ -410,6 +456,7 @@ def main() -> int:
         shoot_notice_and_diff()
         shoot_pull()
         shoot_settings()
+        shoot_newfiles()
 
         dlg = GitHubAuthDialog(win)
         dlg.setModal(False)

@@ -233,12 +233,57 @@ def managed_names(group: dict) -> list[str]:
     return [str(n) for n in (group.get('files') or []) if isinstance(n, str)]
 
 
+def ignored_names(group: dict) -> list[str]:
+    """用户明确说过「不再提示」的文件（设计稿 S-02）。
+
+    用户在新文件提示里**取消勾选**某个文件，就表示「这个我不想让它上 GitHub」。
+    记住它，下次推送不再拿同一件事来烦人；文件仍然可以在左栏右键
+    「纳入 GitHub 管理」手动加回来。
+    """
+    return [str(n) for n in (group.get('ignored') or []) if isinstance(n, str)]
+
+
+def add_ignored(cfg: dict, group_id: str, names: list[str]) -> dict | None:
+    """把若干文件名加进「不再提示」名单（去重、保持原顺序）。"""
+    g = group_by_id(cfg, group_id)
+    if g is None:
+        return None
+    seen = ignored_names(g)
+    for n in names:
+        n = str(n)
+        if n not in seen:
+            seen.append(n)
+    g['ignored'] = seen
+    return g
+
+
 def is_managed(cfg: dict, path: str | os.PathLike) -> bool:
     """这个文件是否「在某个分组里，且被勾选纳入管理」。"""
     g = group_for_path(cfg, path)
     if g is None:
         return False
     return Path(path).name in managed_names(g)
+
+
+def scan_notes_detailed(folder: str | os.PathLike) -> list[dict]:
+    """扫同一个范围，但带上修改时间 —— S-02 的新文件列表要显示「10-07 15:20」。
+
+    排序按名称（与 :func:`scan_notes` 一致），界面读起来稳定；
+    要按时间排的话在调用方排，不在这里替界面做决定。
+    """
+    p = Path(folder)
+    if not p.is_dir():
+        return []
+    out: list[dict] = []
+    for f in p.iterdir():
+        try:
+            if not f.is_file() or f.suffix.lower() not in NOTE_EXTENSIONS:
+                continue
+            mtime = f.stat().st_mtime
+        except OSError:
+            continue          # 读不到就跳过：不该因为一个坏文件让整个列表消失
+        out.append({'name': f.name, 'mtime': mtime})
+    return sorted(out, key=lambda d: str(d['name']).lower())
 
 
 def scan_notes(folder: str | os.PathLike) -> list[str]:
@@ -248,12 +293,7 @@ def scan_notes(folder: str | os.PathLike) -> list[str]:
     加一层嵌套会让左栏的树、勾选弹窗、路径显示都复杂一档。
     将来真需要子目录时，再加 ``recursive`` 开关。
     """
-    p = Path(folder)
-    if not p.is_dir():
-        return []
-    items = [f.name for f in p.iterdir()
-             if f.is_file() and f.suffix.lower() in NOTE_EXTENSIONS]
-    return sorted(items, key=lambda s: s.lower())
+    return [str(d['name']) for d in scan_notes_detailed(folder)]
 
 
 def set_files(cfg: dict, group_id: str, names: list[str]) -> dict | None:
@@ -336,6 +376,7 @@ def new_group(folder: str | os.PathLike, name: str | None = None) -> dict:
         'repo': '',
         'branch': DEFAULTS['branch'],
         'files': [],
+        'ignored': [],
         'site': True,
         'site_title': label,
         'docs_dir': DEFAULTS['docs_dir'],

@@ -52,6 +52,7 @@ from .widgets.diffdialog import DiffDialog
 from .widgets.editor import CodeEditor
 from .widgets.findbar import FindBar
 from .widgets.managedialog import ManageFolderDialog
+from .widgets.newfilesdialog import NewFilesDialog
 from .widgets.notice import ask, notice
 from .widgets.pulldialog import PullDialog
 from .widgets.pushdialog import PushDialog
@@ -150,6 +151,65 @@ class _EmptyState(QWidget):
         lay.addWidget(hint)
 
         lay.addStretch(1)
+
+
+class _WelcomeState(QWidget):
+    """编辑区欢迎态（设计稿 V3-10）。
+
+    只在**什么都还没开始**的时候出现：没绑账号、没纳管文件夹、也没打开过文件。
+
+    刻意不做成向导 —— 把引导写进界面空着的地方，比弹一个三步弹窗更不打扰。
+    文案是设计稿原文，一字未改。
+    """
+
+    TEXT = (
+        '欢迎使用 FreePushNote\n'
+        '\n'
+        '这是你的第一个工作区。左侧会列出你打开过的 txt，\n'
+        '以及已经纳入 GitHub 管理的文件夹。\n'
+        '\n'
+        '开始之前需要先做两件事：\n'
+        '\n'
+        '  1. 绑定 GitHub 账号 —— 在右侧面板点「绑定 GitHub 账号」\n'
+        '  2. 打开或新建一个 txt —— 用工具栏的「打开 / 新建」\n'
+        '\n'
+        '之后点一次 Push，笔记就会变成一个\n'
+        '可以随时用手机打开的在线文档站。'
+    )
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(40, 0, 40, 0)
+        lay.addStretch(1)
+
+        body = QLabel()
+        body.setTextFormat(Qt.RichText)
+        body.setAlignment(Qt.AlignCenter)
+        body.setText(self._as_html(self.TEXT))
+        # 稿子指定 Sarasa Gothic SC + 15px + 行高 26px。字体缺失时退回界面字体，
+        # 不会因为少装一个字体就变成方框。
+        body.setStyleSheet(
+            f'color: {theme.TEXT_PRIMARY}; font-size: 15px;'
+            f'font-family: "Sarasa Gothic SC", {theme.UI_STACK};')
+        lay.addWidget(body)
+        lay.addStretch(1)
+
+    @staticmethod
+    def _as_html(text: str) -> str:
+        """按稿子要的行高渲染。
+
+        Qt 的富文本会吃掉行首空格（HTML 的白空格折叠规则），而稿子里那两行
+        步骤是**缩进**的 —— 所以只把行首两个空格换成 ``&nbsp;``，
+        行内的普通空格保持原样，换行逻辑不受影响。
+        """
+        lines = []
+        for line in text.split('\n'):
+            if line.startswith('  '):
+                line = '&nbsp;&nbsp;' + line[2:]
+            lines.append(line or '&nbsp;')
+        return ('<div style="line-height:26px;">'
+                + '<br>'.join(lines) + '</div>')
 
 
 class FreePushWindow(QWidget):
@@ -281,7 +341,12 @@ class FreePushWindow(QWidget):
         self.editor.font_size_changed.connect(self._on_font_size_changed)
 
         self._editor_stack = QStackedWidget()
-        self._editor_stack.addWidget(_EmptyState())
+        # 空态有两副面孔：日常空态（V3-11）与「什么都还没开始」的欢迎态（V3-10）。
+        # 用一层小栈切换，编辑区自身的位置与布局完全不受影响。
+        self._empty_stack = QStackedWidget()
+        self._empty_stack.addWidget(_EmptyState())
+        self._empty_stack.addWidget(_WelcomeState())
+        self._editor_stack.addWidget(self._empty_stack)
         self._editor_stack.addWidget(self.editor)
 
         # 编辑区 = 查找条 + 编辑器。查找条平时藏着，Ctrl+F 才落下来 ——
@@ -561,6 +626,18 @@ class FreePushWindow(QWidget):
         self.statusbar.set_sync(state)
         self.rail.set_sync_state(state)
 
+    def _refresh_empty_state(self) -> None:
+        """空态该显示哪一副面孔（设计稿 V3-10 欢迎态 / V3-11 日常空态）。
+
+        用**状态驱动**，不记「首次启动」标记：没绑账号 + 没纳管文件夹 +
+        没打开过文件，就是欢迎态。好处是没有一个会跟现实脱节的标记，
+        而且用户把账号解绑、把分组清空之后，自然回到这里重新看到引导。
+        """
+        welcome = (self._account is None
+                   and not core_config.groups(self._cfg)
+                   and not self._recent)
+        self._empty_stack.setCurrentIndex(1 if welcome else 0)
+
     def _refresh_sync(self) -> None:
         """按「有没有绑账号 / 有没有纳管 / 有没有改动」决定这一屏该说什么。
 
@@ -640,6 +717,7 @@ class FreePushWindow(QWidget):
         self._update_cursor()
         self._refresh_encoding()
         self._refresh_groups()
+        self._refresh_empty_state()
         self._refresh_sync()
         self.toolbar.set_has_file(self._current is not None
                                   or self._editor_stack.currentIndex() == 1)
@@ -894,7 +972,7 @@ class FreePushWindow(QWidget):
         self._push_group = group          # 异步链路要一路用回同一个分组
 
         if not core_config.flag(self._cfg, 'check_remote_before_push'):
-            self._stage_group(group)      # 关了远端检测 → 直接整理
+            self._after_remote_ok(group)   # 关了远端检测 → 直接看新文件 / 整理
             return
 
         self._refresh_sync()
@@ -903,6 +981,74 @@ class FreePushWindow(QWidget):
         worker = RemoteCheckWorker(group, token=token, on_log=self._push_log)
         worker.done.connect(self._on_remote_checked)
         start_worker(worker)
+
+    def _after_remote_ok(self, group: dict) -> None:
+        """远端没问题了，先看一眼有没有未纳管的新文件（设计稿 S-02），再整理。
+
+        为什么放在「整理」**之前**：用户在这里点了「纳入并推送」，就应该一次走完。
+        若放到确认层之后，勾选的新文件这次进不了工作区，用户得再推一遍。
+        """
+        if self._push_silent:
+            self._stage_group(group)          # 保存后自动推送：不弹窗打断打字
+            return
+
+        try:
+            fresh = pipeline.new_files(group)
+        except Exception:                     # noqa: BLE001
+            fresh = []                        # 扫不动就当没有，别挡着推送
+        if not fresh:
+            self._stage_group(group)
+            return
+
+        self.panel.set_progress(None)
+        dlg = NewFilesDialog(fresh, group, self)
+        if dlg.exec() != QDialog.Accepted:
+            # 直接关掉 = 这次不推了。关闭一个对话框不该悄悄把东西推上去。
+            self._abort_push()
+            return
+        group = self._apply_new_files(group, dlg)
+        self._stage_group(group)
+
+    def _abort_push(self) -> None:
+        """用户中途取消：把忙碌状态收干净，界面回到可操作的样子。"""
+        self._push_busy = False
+        self._busy_kind = None
+        self.panel.set_progress(None)
+        self._refresh_all()
+
+    def _apply_new_files(self, group: dict, dlg) -> dict:
+        """把用户在 S-02 里的选择落到配置，返回**重新查到的**分组。
+
+        必须重新查：``config.save`` 之后再 ``_reload_cfg`` 会换成新字典，
+        继续用旧的 ``group`` 对象就会丢改动。
+
+        规则（与稿子一致）：
+        - 「纳入并推送」→ 勾选的进白名单
+        - 未勾选的一律记入「不再提示」
+        - 「只推已管理的」→ 白名单不动；勾选过的**不**记入不再提示，
+          因为用户明明表达了想要，下次再问一次是合理的
+        """
+        gid = str(group.get('id') or '')
+        cfg = self._cfg
+        changed = False
+
+        if dlg.mode == 'include' and dlg.picked:
+            names = core_config.managed_names(group)
+            for n in dlg.picked:
+                if n not in names:
+                    names.append(n)
+            core_config.set_files(cfg, gid, names)
+            changed = True
+
+        if dlg.skipped:
+            core_config.add_ignored(cfg, gid, dlg.skipped)
+            changed = True
+
+        if not changed:
+            return group
+        core_config.save(cfg)
+        self._reload_cfg()
+        return core_config.group_by_id(self._cfg, gid) or group
 
     def _stage_group(self, group: dict) -> None:
         """把当前内容整理进工作区并暂存（不联网）。"""
@@ -944,7 +1090,7 @@ class FreePushWindow(QWidget):
                 self.on_pull()
             return
 
-        self._stage_group(group)
+        self._after_remote_ok(group)
 
     def _on_stage_done(self, staged) -> None:
         """整理完成：要么直接失败，要么弹确认层让用户过目这次要推什么。"""

@@ -23,12 +23,8 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QScrollArea,
 from core import config
 
 from .. import icons, theme
-from .dialogbase import CheckButton, FramedDialog, label, note_box
-
-
-def _mono(color: str, size: float, weight: int = 400) -> str:
-    return (f'color: {color}; font-size: {size}px; font-weight: {weight};'
-            f'font-family: {theme.MONO_STACK};')
+from .dialogbase import (CheckButton, FileRow, FramedDialog, label, mono_style,
+                         note_box)
 
 
 def _meta_text(path: Path) -> str:
@@ -67,54 +63,6 @@ def _path_box(path_text: str) -> tuple[QWidget, QHBoxLayout, QLabel]:
     return box, lay, right
 
 
-class _FileRow(QWidget):
-    """一行文件：复选框 + 文件名 + 大小与时间。整行可点。"""
-
-    def __init__(self, name: str, meta: str, checked: bool, on_toggle) -> None:
-        super().__init__()
-        self.name = name
-        self._on_toggle = on_toggle
-
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 0, 8, 0)
-        lay.setSpacing(9)
-
-        self.check = CheckButton(checked)
-        lay.addWidget(self.check)
-
-        self._title = label(name, theme.TEXT_BODY, theme.FS_UI, mono=True)
-        lay.addWidget(self._title, 1)
-
-        self._meta = label(meta, theme.TEXT_FAINT, theme.FS_LABEL, mono=True)
-        lay.addWidget(self._meta)
-
-        self.setFixedHeight(30)
-        self.setCursor(Qt.PointingHandCursor)
-        self.check.clicked.connect(self._notify)
-        self._sync_look()
-
-    def _notify(self) -> None:
-        self._sync_look()
-        self._on_toggle(self.name, self.check.isChecked())
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.LeftButton:
-            self.check.setChecked(not self.check.isChecked())
-            self._notify()
-        super().mousePressEvent(event)
-
-    def _sync_look(self) -> None:
-        on = self.check.isChecked()
-        self._title.setStyleSheet(_mono(theme.TEXT_BODY if on else theme.TEXT_GHOST,
-                                        theme.FS_UI))
-        self._meta.setStyleSheet(_mono(theme.TEXT_FAINT if on else theme.TEXT_GHOST,
-                                       theme.FS_LABEL))
-
-    def set_checked(self, value: bool) -> None:
-        self.check.setChecked(value)
-        self._sync_look()
-
-
 class ManageFolderDialog(FramedDialog):
     """``exec()`` 返回 Accepted 时，``self.group`` 是一个校验通过的分组字典。"""
 
@@ -130,7 +78,7 @@ class ManageFolderDialog(FramedDialog):
         wanted = preselect if preselect is not None else (
             (existing or {}).get('files') or [])
         self._checked = {n for n in self._files if n in set(wanted)}
-        self._rows: dict[str, _FileRow] = {}
+        self._rows: dict[str, FileRow] = {}
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._build_files_page())
@@ -188,7 +136,7 @@ class ManageFolderDialog(FramedDialog):
             inner.setContentsMargins(4, 5, 4, 5)
             inner.setSpacing(1)
             for name in self._files:
-                row = _FileRow(name, _meta_text(self._folder / name),
+                row = FileRow(name, _meta_text(self._folder / name),
                                name in self._checked, self._on_row_toggle)
                 self._rows[name] = row
                 inner.addWidget(row)
@@ -268,7 +216,7 @@ class ManageFolderDialog(FramedDialog):
         picked = len(self._checked)
         self._sel_count.setText(f'已选 {picked} / 共 {total}')
         self._sel_count.setStyleSheet(
-            _mono(theme.TEXT_MUTED if picked else theme.WARNING, theme.FS_LABEL))
+            mono_style(theme.TEXT_MUTED if picked else theme.WARNING, theme.FS_LABEL))
         self._all_hint.setText('全选' if picked < total else '已全选')
         self._cb_all.setChecked(picked == total and total > 0)
         self._picked_hint.setText(f'已选 {picked} 个')

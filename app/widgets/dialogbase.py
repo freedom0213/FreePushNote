@@ -21,9 +21,14 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QDialog, QFrame, QGraphicsDropShadowEffect,
                                QHBoxLayout, QLabel, QPushButton, QToolButton,
-                               QVBoxLayout)
+                               QVBoxLayout, QWidget)
 
 from .. import icons, theme
+
+
+def mono_style(color: str, size: float, weight: int = 400) -> str:
+    return (f'color: {color}; font-size: {size}px; font-weight: {weight};'
+            f'font-family: {theme.MONO_STACK};')
 
 
 def label(text: str = '', color: str = theme.TEXT_MUTED, size: float = theme.FS_SMALL,
@@ -249,3 +254,57 @@ class CheckButton(QToolButton):
         else:
             self.setIcon(icons.icon('checkbox-off', theme.TEXT_WEAK, 15))
         self.setIconSize(QSize(15, 15))
+
+
+class FileRow(QWidget):
+    """一行可选文件：复选框 + 文件名 + 右侧元信息。整行可点。
+
+    从「纳入 GitHub 管理」对话框提升到这里共用 —— 两处都要展示
+    「勾选的文件清单」，各写一份迟早会样式漂移（一处行高 30、另一处 32）。
+    ``meta`` 由调用方决定：纳管弹窗给「大小 · 时间」，S-02 只给时间。
+    """
+
+    def __init__(self, name: str, meta: str, checked: bool, on_toggle=None) -> None:
+        super().__init__()
+        self.name = name
+        self._on_toggle = on_toggle
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 0, 8, 0)
+        lay.setSpacing(9)
+
+        self.check = CheckButton(checked)
+        lay.addWidget(self.check)
+
+        self._title = label(name, theme.TEXT_BODY, theme.FS_UI, mono=True)
+        lay.addWidget(self._title, 1)
+
+        self._meta = label(meta, theme.TEXT_FAINT, theme.FS_LABEL, mono=True)
+        lay.addWidget(self._meta)
+
+        self.setFixedHeight(30)
+        self.setCursor(Qt.PointingHandCursor)
+        self.check.clicked.connect(self._notify)
+        self._sync_look()
+
+    def _notify(self) -> None:
+        self._sync_look()
+        if self._on_toggle is not None:
+            self._on_toggle(self.name, self.check.isChecked())
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.check.setChecked(not self.check.isChecked())
+            self._notify()
+        super().mousePressEvent(event)
+
+    def _sync_look(self) -> None:
+        on = self.check.isChecked()
+        self._title.setStyleSheet(mono_style(
+            theme.TEXT_BODY if on else theme.TEXT_GHOST, theme.FS_UI))
+        self._meta.setStyleSheet(mono_style(
+            theme.TEXT_FAINT if on else theme.TEXT_GHOST, theme.FS_LABEL))
+
+    def set_checked(self, value: bool) -> None:
+        self.check.setChecked(value)
+        self._sync_look()
