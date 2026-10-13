@@ -595,6 +595,67 @@ def test_pull(bare: Path) -> None:
               (fresh / '本地笔记.txt').read_text(encoding='utf-8')
               == '本地本来就有的一行\n')
 
+        # ── 提交历史（「提交历史」窗口的左栏）──
+        history = pipeline.commit_log(group)
+        check('本机能读到提交历史', history['ok'] and bool(history['commits']),
+              f"{history.get('message')} / {len(history.get('commits') or [])}")
+        top = (history.get('commits') or [{}])[0]
+        check('最新一条在最前面', top.get('message') == '基线', str(top))
+        check('每条都带 sha / 短 sha / 时间 / 作者 / 信息',
+              all(k in top for k in ('sha', 'short', 'when', 'author', 'message')),
+              str(top))
+        check('提交历史只读本地，不因没网而失败',
+              history['rev'] == 'HEAD', str(history.get('rev')))
+
+        patch = pipeline.commit_patch(group, str(top.get('sha') or ''))
+        check('能取到某次提交的 diff', '验收笔记A.txt' in patch or '未改.txt' in patch
+              or '+' in patch, patch[:120].replace('\n', '|'))
+        check('diff 里不含提交信息头（界面自己会显示标题）',
+              'Author:' not in patch and 'commit ' not in patch[:20], patch[:80])
+
+        remote_history = pipeline.commit_log(group, remote=True, token='fake-token')
+        check('远端档能读到（fetch 之后）',
+              remote_history['ok'] and remote_history['rev'] == 'origin/main',
+              f"{remote_history.get('message')} / {remote_history.get('rev')}")
+        check('远端档也有提交', bool(remote_history['commits']),
+              str(len(remote_history.get('commits') or [])))
+
+        # 完全没提交过的分组：不能报错，要如实说「还没有」
+        empty_log = pipeline.commit_log({'id': 'nohead', 'repo': group['repo'],
+                                         'branch': 'main',
+                                         'folder': str(folder)})
+        check('还没提交过时返回空列表而不是报错',
+              empty_log['ok'] and empty_log['commits'] == [], str(empty_log))
+
+        # ── 补丁整理：去噪音、文件头换成人话，但一行正文都不动 ──
+        raw = ('diff --git a/笔记.txt b/笔记.txt\n'
+               'index 1111111..2222222 100644\n'
+               '--- a/笔记.txt\n'
+               '+++ b/笔记.txt\n'
+               '@@ -1,2 +1,3 @@\n'
+               ' 第一行\n'
+               '--- 正文里被删掉的一行（原内容以 -- 开头）\n'
+               '+新加的一行\n')
+        tidy = pipeline._tidy_patch(raw)
+        check('整理后不再有 diff --git 行', 'diff --git' not in tidy, tidy[:80])
+        check('整理后不再有 index 行', 'index 1111111' not in tidy, tidy[:140])
+        check('文件头换成人话（旧版 / 新版）',
+              '--- 旧版 · 笔记.txt' in tidy and '+++ 新版 · 笔记.txt' in tidy,
+              tidy[:140])
+        check('正文里以 --- 开头的行必须原样保留（否则会吃掉笔记内容）',
+              '--- 正文里被删掉的一行' in tidy, tidy.replace('\n', '|'))
+        # 最要紧的一条：@@ 之后是正文，必须**逐字不变**
+        check('@@ 之后的正文逐字不变',
+              raw.split('@@', 1)[1] == tidy.split('@@', 1)[1],
+              tidy.split('@@', 1)[1].replace('\n', '|'))
+        check('文件头还在（界面靠它数文件数）',
+              sum(1 for l in tidy.splitlines() if l.startswith('+++ ')) == 1,
+              str(tidy.splitlines()))
+        newby = pipeline._tidy_patch('diff --git a/新.txt b/新.txt\n'
+                                     'new file mode 100644\n--- /dev/null\n'
+                                     '+++ b/新.txt\n@@ -0,0 +1 @@\n+内容\n')
+        check('新增文件的头写成「（新增文件）」', '（新增文件）' in newby, newby)
+
         # ── 「另一台电脑」在远端做改动 ──
         other = _TMP / '另一台电脑'
         gitops.git(_TMP, 'clone', bare.as_uri(), str(other))

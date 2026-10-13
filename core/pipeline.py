@@ -683,6 +683,107 @@ def check_remote(group: dict, *, token: str | None = None, on_log=None) -> dict:
             'first_time': not gitops.head_exists(ws)}
 
 
+def commit_log(group: dict, *, remote: bool = False, token: str | None = None,
+               limit: int = 60, on_log=None) -> dict:
+    """提交历史（「提交历史」窗口的左栏）。
+
+    * ``remote=False``：看**本机中转区**的提交 —— 也就是这台机器推上去的那些。
+      只读本地对象库，**不起网络**。
+    * ``remote=True``：先 ``fetch`` 再看远端分支，需要 token。远端那份才有
+      「别人在另一台电脑 / 网页上推的提交」。
+
+    返回 ``{'ok','reason','message','rev','commits','detail'?}``，
+    ``commits`` 每项为 ``{'sha','short','when','author','message'}``。
+    """
+    log = on_log or (lambda *_a, **_k: None)
+    if not group.get('repo'):
+        return {'ok': False, 'reason': REASON_NO_REMOTE, 'rev': '', 'commits': [],
+                'message': '还没有关联 GitHub 仓库。'}
+
+    try:
+        ws = prepare_workspace(group, on_log=log)
+    except (gitops.GitError, OSError) as exc:
+        return {'ok': False, 'reason': REASON_GIT_ERROR, 'rev': '', 'commits': [],
+                'message': '准备工作区失败。', 'detail': str(exc)}
+
+    branch = str(group.get('branch') or 'main')
+    rev = 'HEAD'
+    if remote:
+        if not token:
+            return {'ok': False, 'reason': REASON_NO_REMOTE, 'rev': '', 'commits': [],
+                    'message': '还没有绑定 GitHub 账号，读不到远端历史。'}
+        if not gitops.fetch(ws, branch, token=token, on_log=log):
+            return {'ok': False, 'reason': REASON_FETCH_FAILED, 'rev': '',
+                    'commits': [],
+                    'message': '连不上 GitHub，读不到远端历史。'}
+        rev = f'origin/{branch}'
+
+    commits = gitops.log_list(ws, rev, limit=limit)
+    return {'ok': True, 'reason': REASON_OK, 'rev': rev, 'commits': commits,
+            'message': '' if commits else '这里还没有任何提交。'}
+
+
+#: git 原始补丁里那些「给程序看」的头行。它们对写笔记的人只是噪音。
+_PATCH_NOISE = ('index ', 'new file mode ', 'deleted file mode ', 'old mode ',
+                'new mode ', 'similarity index ', 'dissimilarity index ',
+                'rename from ', 'rename to ', 'copy from ', 'copy to ')
+
+
+def _strip_ab(path: str) -> str:
+    """去掉 git 给文件头加的 ``a/`` ``b/`` 前缀。"""
+    for pre in ('a/', 'b/'):
+        if path.startswith(pre):
+            return path[2:]
+    return path
+
+
+def _tidy_patch(text: str) -> str:
+    """把 ``git show`` 的原始补丁整理成人能读的样子。
+
+    原始输出里 ``diff --git a/x b/x`` / ``index`` / ``new file mode`` 这些是给程序看的，
+    文件头还带 ``a/`` ``b/`` 前缀 —— 对写笔记的人来说全是噪音。
+    这里**只删噪音、只换文件头那几个字，一行正文都不动**（动了增删行数就对不上）。
+
+    ⚠️ 正文里也可能出现以 ``--- `` 开头的行（例如笔记里画的分隔线，或删掉的一行
+    ``-- foo``）。所以只把 ``diff --git`` 之后、``@@`` 之前的那两行当文件头。
+    """
+    out: list[str] = []
+    in_header = False
+    for line in text.splitlines():
+        if line.startswith('diff --git '):
+            in_header = True
+            continue
+        if line.startswith(_PATCH_NOISE):
+            continue
+        if in_header and line.startswith('--- '):
+            path = line[4:].strip()
+            out.append('--- ' + ('（新增文件）' if path == '/dev/null'
+                                 else f'旧版 · {_strip_ab(path)}'))
+            continue
+        if in_header and line.startswith('+++ '):
+            path = line[4:].strip()
+            out.append('+++ ' + ('（已删除）' if path == '/dev/null'
+                                 else f'新版 · {_strip_ab(path)}'))
+            in_header = False
+            continue
+        out.append(line)
+    joined = '\n'.join(out)
+    return joined + '\n' if text.endswith('\n') else joined
+
+
+def commit_patch(group: dict, sha: str, on_log=None) -> str:
+    """某一次提交的逐行 diff（统一格式）。
+
+    commit 与 fetch 都已经把对象放进本地对象库，所以这里**不联网** ——
+    点一下列表就出内容，不该有等待。
+    """
+    try:
+        ws = prepare_workspace(group, on_log=on_log)
+    except (gitops.GitError, OSError):
+        return ''
+    return _tidy_patch(gitops.commit_diff(ws, sha))
+
+
 def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan:
     """分析一次拉取：谁会更新、谁要合并、谁冲突。**不改任何文件。**"""
     log = on_log or (lambda *_a, **_k: None)

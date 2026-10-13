@@ -37,6 +37,7 @@ class EditorToolBar(QFrame):
     new_requested = Signal()
     open_requested = Signal()
     save_requested = Signal()
+    close_requested = Signal()
     find_requested = Signal()
     settings_requested = Signal()
 
@@ -61,6 +62,12 @@ class EditorToolBar(QFrame):
         self.btn_save.clicked.connect(self.save_requested)
         row.addWidget(self.btn_save)
 
+        # 「关闭」与侧栏那个 × 不是一回事：× 只是「别在列表里占地方」，
+        # 这里是真的把当前文档放下、回到空态。缺了它就没法"什么都不打开"。
+        self.btn_close = _ToolButton('close', '关闭', '关闭当前文件（Ctrl+W）')
+        self.btn_close.clicked.connect(self.close_requested)
+        row.addWidget(self.btn_close)
+
         divider = QFrame()
         divider.setFixedSize(1, 16)
         divider.setStyleSheet(f'background: {theme.BORDER_STRONG};')
@@ -84,6 +91,7 @@ class EditorToolBar(QFrame):
         self.set_has_file(False)
 
     def set_has_file(self, has_file: bool) -> None:
-        """没有打开文件时，保存 / 查找 应当是禁用的 —— 别让用户点了没反应。"""
+        """没有打开文件时，保存 / 关闭 / 查找 应当是禁用的 —— 别让用户点了没反应。"""
         self.btn_save.setEnabled(has_file)
+        self.btn_close.setEnabled(has_file)
         self.btn_find.setEnabled(has_file)

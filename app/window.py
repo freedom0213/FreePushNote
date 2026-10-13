@@ -49,6 +49,7 @@ from . import account as account_mod, diag, fileio, icons, theme
 from .widgets.accountdialog import AccountDialog
 from .widgets.authdialog import GitHubAuthDialog
 from .widgets.diffdialog import DiffDialog
+from .widgets.historydialog import HistoryDialog
 from .widgets.editor import CodeEditor
 from .widgets.findbar import FindBar
 from .widgets.managedialog import ManageFolderDialog
@@ -57,8 +58,9 @@ from .widgets.notice import ask, notice
 from .widgets.pulldialog import PullDialog
 from .widgets.pushdialog import PushDialog
 from .widgets.settingsdialog import SettingsDialog
-from .workers import (ApplyPullWorker, PullPlanWorker, PushWorker,
-                      RemoteCheckWorker, StageWorker, start_worker)
+from .workers import (ApplyPullWorker, CommitDiffWorker, HistoryWorker,
+                      PullPlanWorker, PushWorker, RemoteCheckWorker,
+                      StageWorker, start_worker)
 from .widgets.panel import PanelRail, PushPanel
 from .widgets.sidebar import Sidebar, SidebarRail
 from .widgets.statusbar import StatusBar
@@ -287,6 +289,10 @@ class FreePushWindow(QWidget):
         # 这次推送 / 拉取对应的分组（整理在后台线程里跑，确认层要用回同一个分组）
         self._push_group: dict | None = None
         self._pull_group: dict | None = None
+        #: 提交历史窗口 + 它对应的分组。后台线程回来时靠它们判断「窗口还在不在」——
+        #: 往已销毁的 Qt 对象上写属性会直接抛异常，那种异常会走 abort 路径。
+        self._history_dlg = None
+        self._history_group: dict | None = None
         #: 当前忙的是什么：'push' | 'pull' | None —— 界面文案要跟着变
         self._busy_kind: str | None = None
         #: 本次推送是否静默（自动推送触发时为真：不弹任何对话框）
@@ -343,6 +349,7 @@ class FreePushWindow(QWidget):
         self.toolbar.new_requested.connect(self.new_file)
         self.toolbar.open_requested.connect(lambda: self.open_file())
         self.toolbar.save_requested.connect(self.save_file)
+        self.toolbar.close_requested.connect(self.close_file)
         self.toolbar.find_requested.connect(self.find_in_file)
         self.toolbar.settings_requested.connect(self.open_settings)
         inner.addWidget(self.toolbar)
@@ -406,6 +413,7 @@ class FreePushWindow(QWidget):
         self.panel.push_requested.connect(self.on_push)
         self.panel.pull_requested.connect(self.on_pull)
         self.panel.diff_requested.connect(self.on_diff)
+        self.panel.history_requested.connect(self.on_history)
         self.panel.settings_requested.connect(self.open_settings)
         self.panel.account_chip_clicked.connect(self.open_account)
         center_lay.addWidget(self.panel)
@@ -431,6 +439,7 @@ class FreePushWindow(QWidget):
         bind('Ctrl+O', lambda: self.open_file())
         bind('Ctrl+S', self.save_file)
         bind('Ctrl+Shift+S', self.save_file_as)
+        bind('Ctrl+W', self.close_file)
         bind('Ctrl+F', self.find_in_file)
         bind('Ctrl+Enter', self.on_push)
         bind('Ctrl+,', self.open_settings)
@@ -514,6 +523,41 @@ class FreePushWindow(QWidget):
             self._refresh_all()
             return True
         return False
+
+    def close_file(self) -> None:
+        """关闭当前文件，回到空态（工具栏「关闭」/ Ctrl+W）。
+
+        与侧栏那个 × **不是一回事**：× 只表示「别在列表里占地方」，不动正在编辑的
+        文档（见 :meth:`_remove_recent`）；这里才是真的把当前文档放下。
+        所以先把没落盘的改动写下去，再清掉当前文件。
+
+        关闭后它仍然留在「最近打开」里 —— 想接着写，点一下就能回来。
+        """
+        if self._editor_stack.currentIndex() == 0:
+            return                        # 本来就没在编辑，不打扰
+        self._close_findbar()
+
+        if self._dirty:
+            if self._current is None:
+                # 新建的空文档还没落过盘。这里既不能默默弹「另存为」，
+                # 也不能把用户刚写的东西直接扔掉 —— 问一次，让他自己决定。
+                if not ask(self, '这篇还没有保存',
+                           '关闭会丢掉刚写的内容。要现在保存吗？',
+                           ok_text='去保存', cancel_text='不保存'):
+                    return
+                if not self.save_file_as():
+                    return                # 另存为被取消 → 这次关闭也算了
+            elif not self.save_file():
+                return                    # 保存失败就别关了，内容还在这儿
+
+        self._current = None
+        self._encoding = 'utf-8'
+        self._eol = 'crlf'
+        self._dirty = False
+        self.editor.load_text('')
+        self._editor_stack.setCurrentIndex(0)
+        diag.note('已关闭当前文件，回到空态')
+        self._refresh_all()
 
     def _do_autosave(self) -> None:
         """自动保存：只覆盖已有文件，不弹「另存为」——没人希望打字打到一半跳对话框。"""
@@ -1466,6 +1510,78 @@ class FreePushWindow(QWidget):
         dlg = DiffDialog(rows, self)
         self._center_dialog(dlg)
         dlg.exec()
+
+    def on_history(self) -> None:
+        """提交历史：过去推过什么、每一次改了什么。
+
+        与「查看差异」分工不同 —— 那个回答「我这次推上去会改什么」，
+        这个回答「过去都改了什么」。默认看**本机推过的**（只读本地对象库，
+        不联网）；切到「远端仓库」才需要联网，所以那一步由这里去后台 fetch。
+
+        列表与具体 diff 都在后台线程里取：点的时候界面不能卡，
+        点某一条时也不能等。
+        """
+        group = self._current_group()
+        if group is None or not group.get('repo'):
+            notice(self, '还没有可看的提交记录',
+                   '这个文件所在的文件夹还没关联 GitHub 仓库，也就没有提交历史。',
+                   kind='info')
+            return
+
+        self._history_group = group
+        dlg = HistoryDialog(group, self)
+        self._center_dialog(dlg)
+        dlg.commit_selected.connect(self._on_history_commit)
+        dlg.remote_requested.connect(lambda: self._load_history(remote=True))
+        self._history_dlg = dlg
+        self._load_history(remote=False)
+        try:
+            dlg.exec()
+        finally:
+            self._history_dlg = None
+            self._history_group = None
+
+    def _load_history(self, *, remote: bool) -> None:
+        group = self._history_group
+        if group is None:
+            return
+        diag.note(f'提交历史 · 正在读取（remote={remote}）')
+        worker = HistoryWorker(group, remote=remote,
+                               token=(self._account.token if self._account else ''),
+                               on_log=self._push_log)
+        worker.done.connect(lambda result, r=remote: self._on_history_log(result, r))
+        start_worker(worker)
+
+    def _on_history_log(self, result: dict, remote: bool) -> None:
+        dlg = self._history_dlg
+        if dlg is None:
+            return            # 对话框已经关了 —— 别再去碰已销毁的对象
+        commits = result.get('commits') or []
+        diag.note(f'提交历史 · remote={remote} ok={result.get("ok")}'
+                  f' 条数={len(commits)} msg={result.get("message")!r}')
+        dlg.set_commits(result, scope='remote' if remote else 'local')
+        if not result.get('ok'):
+            # 失败必须说清楚：否则列表空着，用户分不清是「没有」还是「没读到」
+            failed = result.get('reason') in (pipeline.REASON_GIT_ERROR,
+                                              pipeline.REASON_FETCH_FAILED)
+            detail = f'\n\n{result["detail"]}' if result.get('detail') else ''
+            notice(self, '没能读取提交历史',
+                   (result.get('message') or '读取失败。') + detail,
+                   kind='error' if failed else 'warning')
+
+    def _on_history_commit(self, sha: str) -> None:
+        group = self._history_group
+        if group is None or not sha:
+            return
+        worker = CommitDiffWorker(group, sha, on_log=self._push_log)
+        worker.done.connect(self._on_history_patch)
+        start_worker(worker)
+
+    def _on_history_patch(self, sha: str, text: str) -> None:
+        dlg = self._history_dlg
+        if dlg is None:
+            return            # 同上：过期结果直接丢掉
+        dlg.set_patch(sha, text)
 
     def open_settings(self) -> None:
         """设置页（设计稿 V3-09）。四张卡片：账号 / 受管理的文件夹 / 推送行为 / 关于。"""

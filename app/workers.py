@@ -134,6 +134,50 @@ class ApplyPullWorker(QThread):
         self.done.emit(result)
 
 
+class HistoryWorker(QThread):
+    """取提交历史（本机只读对象库；远端要先 fetch，所以需要 token）。"""
+
+    done = Signal(object)      # {'ok','reason','message','rev','commits',...}
+
+    def __init__(self, group: dict, *, remote: bool = False,
+                 token: str | None = None, on_log=None) -> None:
+        super().__init__()
+        self._group = group
+        self._remote = remote
+        self._token = token
+        self._on_log = on_log
+
+    def run(self) -> None:  # noqa: D102
+        try:
+            result = pipeline.commit_log(self._group, remote=self._remote,
+                                         token=self._token, on_log=self._on_log)
+        except Exception as exc:  # noqa: BLE001 - 兜底：绝不让异常把线程带崩
+            result = {'ok': False, 'reason': pipeline.REASON_GIT_ERROR,
+                      'rev': '', 'commits': [],
+                      'message': '读取提交历史时出错了。', 'detail': repr(exc)}
+        self.done.emit(result)
+
+
+class CommitDiffWorker(QThread):
+    """取某一次提交的逐行 diff（对象已在本地，不联网）。"""
+
+    done = Signal(str, str)    # (sha, 补丁文本)
+
+    def __init__(self, group: dict, sha: str, on_log=None) -> None:
+        super().__init__()
+        self._group = group
+        self._sha = sha
+        self._on_log = on_log
+
+    def run(self) -> None:  # noqa: D102
+        try:
+            text = pipeline.commit_patch(self._group, self._sha,
+                                         on_log=self._on_log)
+        except Exception:  # noqa: BLE001
+            text = ''
+        self.done.emit(self._sha, text)
+
+
 def start_worker(worker: QThread) -> QThread:
     """启动并持有引用（调用方不必自己管 GC）。"""
     _LIVE.add(worker)

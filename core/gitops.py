@@ -516,6 +516,44 @@ def diff_names(path: str | Path, rev_range: str) -> list[str]:
     return [l for l in stdout_of(proc).splitlines() if l.strip()]
 
 
+def log_list(path: str | Path, rev: str = 'HEAD', *,
+             limit: int = 60) -> list[dict]:
+    """提交列表（新 → 旧）。``rev`` 不存在（空仓库 / 没 fetch 过）时返回空列表。
+
+    字段之间用 ``\\x1f``（ASCII 单元分隔符）隔开：提交信息里什么都可能有，
+    逗号、竖线、tab 都不安全。
+    """
+    if not rev_exists(path, rev):
+        return []
+    proc = git(path, '-c', 'core.quotepath=false',
+               'log', f'--max-count={int(limit)}',
+               '--pretty=format:%H%x1f%h%x1f%ad%x1f%an%x1f%s',
+               '--date=format:%Y-%m-%d %H:%M', rev, check=False)
+    if proc.returncode != 0:
+        return []
+    items: list[dict] = []
+    for line in stdout_of(proc).splitlines():
+        parts = line.split('\x1f')
+        if len(parts) != 5:
+            continue
+        items.append({'sha': parts[0], 'short': parts[1], 'when': parts[2],
+                      'author': parts[3], 'message': parts[4]})
+    return items
+
+
+def commit_diff(path: str | Path, sha: str, *, context: int = 3) -> str:
+    """某一次提交的逐行 diff（统一格式，供界面着色）。
+
+    ``--format=`` 把提交信息头去掉，只留补丁本身 —— 界面自己会显示标题，
+    重复一遍只会挤占正文。对象在 fetch / commit 时就已进对象库，**不再联网**。
+    """
+    proc = git(path, '-c', 'core.quotepath=false', 'show', '--no-color',
+               f'--unified={int(context)}', '--format=', sha, check=False)
+    if proc.returncode != 0:
+        return ''
+    return (proc.stdout or b'').decode('utf-8', errors='replace')
+
+
 def show_file(path: str | Path, rev: str, rel: str) -> str | None:
     """从对象库取某个文件在某次提交里的内容；该修订里没有这个文件则返回 ``None``。
 

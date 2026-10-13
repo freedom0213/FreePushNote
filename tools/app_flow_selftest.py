@@ -38,6 +38,7 @@ from core import config, envprobe, ghauth, gitops, pipeline  # noqa: E402
 from app import account as account_mod  # noqa: E402
 from app.main import build_app  # noqa: E402
 from app.widgets.diffdialog import DiffDialog  # noqa: E402
+from app.widgets.historydialog import HistoryDialog  # noqa: E402
 from app.widgets.managedialog import ManageFolderDialog  # noqa: E402
 from app.widgets.newfilesdialog import NewFilesDialog  # noqa: E402
 from app.widgets.notice import NoticeDialog  # noqa: E402
@@ -54,6 +55,8 @@ DiffDialog.exec = lambda self: 0            # 差异窗口：看一眼就关，�
 # 不这么拦，推送链路上的用例会弹真模态框把脚本挂死。
 # 专门测 S-02 的用例会临时换成自己的假 exec。
 NewFilesDialog.exec = lambda self: 1
+# 提交历史窗口：同理，不进事件循环（它内部的列表与 diff 由用例直接喂）
+HistoryDialog.exec = lambda self: 0
 
 PASS = 0
 FAIL = 0
@@ -503,6 +506,118 @@ def _test_diag(win) -> None:
     finally:
         diag.disable()
     check('disable() 之后停止写入', diag._ENABLED is False, str(diag._ENABLED))
+
+
+def _test_close_file(win) -> None:
+    """[26] 「关闭文件」动作：回到空态，但不从「最近打开」里消失。
+
+    与侧栏那个 × 的语义必须分开：× = 别在列表里占地方，不动文档；
+    关闭 = 把文档放下。这条用例就是把这个区别钉住。
+    """
+    print('\n[26] 关闭文件（工具栏「关闭」/ Ctrl+W）')
+    from PySide6.QtWidgets import QFileDialog
+
+    target = _TMP / '关闭测试.txt'
+    target.write_text('第一行\n第二行\n', encoding='utf-8', newline='\n')
+    win.load_path(str(target))
+    check('打开后编辑区在显示', win._editor_stack.currentIndex() == 1,
+          str(win._editor_stack.currentIndex()))
+    check('打开后「关闭」可用', win.toolbar.btn_close.isEnabled())
+
+    win.close_file()
+    check('关闭后回到空态', win._editor_stack.currentIndex() == 0,
+          str(win._editor_stack.currentIndex()))
+    check('关闭后当前文件为空', win._current is None, str(win._current))
+    check('关闭后编辑区内容已清空', win.editor.toPlainText() == '',
+          repr(win.editor.toPlainText()[:40]))
+    check('关闭后「关闭」按钮随之禁用', not win.toolbar.btn_close.isEnabled())
+    check('文件仍留在「最近打开」里（移除是 × 的事）',
+          any(str(target) == str(r) for r in win._recent), str(win._recent))
+
+    win.close_file()
+    check('已在空态时再关闭是空操作', win._editor_stack.currentIndex() == 0)
+
+    # 新建的空文档还没落过盘 → 关闭要先问一次；用户取消「另存为」时放弃关闭
+    real_save = QFileDialog.getSaveFileName
+    try:
+        win.new_file()
+        win.editor.setPlainText('还没保存的内容')
+        win._dirty = True
+        QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: ('', ''))
+        win.close_file()
+        check('未保存的新文档：另存为被取消时不关闭',
+              win._editor_stack.currentIndex() == 1,
+              str(win._editor_stack.currentIndex()))
+    finally:
+        QFileDialog.getSaveFileName = real_save
+    win._dirty = False
+    win.close_file()          # 收尾，别把状态留给后面的用例
+    check('收尾后确实回到了空态', win._editor_stack.currentIndex() == 0)
+
+
+def _test_history_ui() -> None:
+    """[27] 提交历史窗口：左列表 / 右单次 diff / 统计 / 范围切换。"""
+    print('\n[27] 提交历史窗口')
+    from app.widgets.historydialog import _count_patch
+
+    check('补丁统计正确（+++/--- 是文件头，不算进增删）',
+          _count_patch('--- a\n+++ b\n@@ -1 +1 @@\n-旧\n+新\n+又一行\n')
+          == (1, 2, 1), str(_count_patch('--- a\n+++ b\n@@ -1 +1 @@\n-旧\n+新\n')))
+
+    group = {'id': 'hist', 'name': '历史', 'repo': 'me/hist', 'branch': 'main'}
+    dlg = HistoryDialog(group)
+    picked: list[str] = []
+    dlg.commit_selected.connect(picked.append)
+    dlg.set_commits({'ok': True, 'reason': 'ok', 'rev': 'HEAD', 'message': '',
+                     'commits': [
+                         {'sha': 'a' * 40, 'short': 'aaaaaaa', 'when': '10-13 19:00',
+                          'author': 'freedom0213', 'message': '更新 Java八股'},
+                         {'sha': 'b' * 40, 'short': 'bbbbbbb', 'when': '10-12 10:00',
+                          'author': 'freedom0213', 'message': '补一篇'},
+                     ]})
+    check('列表里两条提交都渲染出来', len(dlg._rows) == 2, str(list(dlg._rows)))
+    check('默认选中最新一条并要求它的 diff', picked == ['a' * 40], str(picked))
+    texts = ' | '.join(w.text() for w in dlg.findChildren(QLabel))
+    check('提交信息与时间进了界面',
+          '更新 Java八股' in texts and '10-13 19:00' in texts, texts[:160])
+
+    dlg.set_patch('a' * 40, '--- a\n+++ b\n@@ -1 +1,2 @@\n-旧\n+新\n+又一行\n')
+    check('diff 正文进了视图', '又一行' in dlg._view.toPlainText(),
+          dlg._view.toPlainText()[:80])
+    check('统计显示文件数与增删',
+          '1 个文件' in dlg._scope_hint.text() and '+2' in dlg._scope_hint.text(),
+          dlg._scope_hint.text())
+
+    dlg.set_patch('b' * 40, '不该出现的内容')
+    check('过期的 diff 结果被丢弃（用户可能已点到别处）',
+          '不该出现' not in dlg._view.toPlainText(),
+          dlg._view.toPlainText()[:60])
+
+    dlg2 = HistoryDialog(group)
+    dlg2.set_commits({'ok': True, 'reason': 'ok', 'rev': 'HEAD',
+                      'message': '这里还没有任何提交。', 'commits': []})
+    check('没有提交时给出说明而不是空白面板',
+          '还没有任何提交' in dlg2._view.toPlainText(),
+          dlg2._view.toPlainText()[:60])
+
+    asked: list[bool] = []
+    dlg2.remote_requested.connect(lambda: asked.append(True))
+    dlg2._switch('remote')
+    check('切到远端会请主窗口去联网读取', asked == [True], str(asked))
+    dlg2._switch('remote')
+    check('连点两下不会触发两轮读取', asked == [True], str(asked))
+    dlg2.set_commits({'ok': False, 'reason': 'fetch_failed', 'rev': '',
+                      'message': '连不上 GitHub，读不到远端历史。', 'commits': []},
+                     scope='remote')
+    check('远端取不到时如实说明', '连不上' in dlg2._view.toPlainText(),
+          dlg2._view.toPlainText()[:60])
+
+    dlg3 = HistoryDialog(group)
+    dlg3.set_commits({'ok': False, 'reason': 'no_remote', 'rev': '',
+                      'message': '还没有关联 GitHub 仓库。', 'commits': []})
+    check('没关联仓库时列表给出原因',
+          '还没有关联 GitHub 仓库' in dlg3._view.toPlainText(),
+          dlg3._view.toPlainText()[:60])
 
 
 def _test_diff_preview(win) -> None:
@@ -1219,6 +1334,8 @@ def main() -> int:  # noqa: C901
     _test_notice(app)
     _test_remote_ahead_prompt(win)
     _test_diag(win)
+    _test_close_file(win)
+    _test_history_ui()
     _test_diff_preview(win)
     _test_pull_ui(win)
     _test_settings_ui(win, app)

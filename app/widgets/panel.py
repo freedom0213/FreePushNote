@@ -185,6 +185,7 @@ class PushPanel(QFrame):
     push_requested = Signal()
     pull_requested = Signal()
     diff_requested = Signal()
+    history_requested = Signal()
     settings_requested = Signal()
     account_chip_clicked = Signal()     # 点头部账号胶囊 → 打开账户页
 
@@ -400,7 +401,7 @@ class PushPanel(QFrame):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
 
-        self.btn_pull = QPushButton('  Pull')
+        self.btn_pull = QPushButton('拉取更新')
         self.btn_pull.setObjectName('GhostButton')
         self.btn_pull.setFixedHeight(32)
         self.btn_pull.setIcon(icons.icon('pull', theme.TEXT_BODY, 14))
@@ -409,7 +410,8 @@ class PushPanel(QFrame):
         self.btn_pull.clicked.connect(self.pull_requested)
         lay.addWidget(self.btn_pull)
 
-        self.btn_diff = QPushButton('  查看差异')
+        # 文案里不再塞前导空格撑图标间距 —— 间距交给 QSS 的 padding
+        self.btn_diff = QPushButton('查看差异')
         self.btn_diff.setObjectName('GhostButton')
         self.btn_diff.setFixedHeight(32)
         self.btn_diff.setIcon(icons.icon('diff', theme.TEXT_BODY, 14))
@@ -452,8 +454,16 @@ class PushPanel(QFrame):
         head = QHBoxLayout()
         head.addWidget(_label('最近推送', theme.TEXT_MUTED, theme.FS_TINY, 600))
         head.addStretch(1)
-        self._history_all = _label('全部记录', theme.TEXT_WEAK, theme.FS_TINY)
-        head.addWidget(self._history_all)
+        # 「全部记录」= 打开提交历史。设计稿里它就在这个位置，做成可点的链接
+        # 比再塞一个按钮更省地方（右栏只有 300px，三个按钮就挤了）。
+        self.btn_history = QToolButton()
+        self.btn_history.setObjectName('LinkButton')
+        self.btn_history.setText('全部记录')
+        self.btn_history.setCursor(Qt.PointingHandCursor)
+        self.btn_history.setToolTip('查看提交历史（每次改了什么）')
+        self.btn_history.setFixedHeight(20)
+        self.btn_history.clicked.connect(self.history_requested)
+        head.addWidget(self.btn_history)
         lay.addLayout(head)
 
         self._history_box = QVBoxLayout()

@@ -50,6 +50,11 @@ _TEMPLATES: dict[str, str] = {
     'restore': ('<svg viewBox="0 0 12 12" fill="none">'
                 '<rect x="1.5" y="3.5" width="7" height="7" rx="1" stroke="{c}" stroke-width="1.1"/>'
                 '<path d="M4 3.5V2.2h5.8v5.8H8.5" stroke="{c}" stroke-width="1.1"/></svg>'),
+    # 提交历史：一只钟。比「带箭头的圆」更好认 —— 写笔记的人看到钟就知道是「过去」。
+    'history': ('<svg viewBox="0 0 14 14" fill="none">'
+                '<circle cx="7" cy="7" r="5.05" stroke="{c}" stroke-width="1.25"/>'
+                '<path d="M7 4.05V7l2.05 1.35" stroke="{c}" stroke-width="1.25" '
+                'stroke-linecap="round" stroke-linejoin="round"/></svg>'),
     'close': ('<svg viewBox="0 0 12 12"><path d="M2.4 2.4 9.6 9.6M9.6 2.4 2.4 9.6" stroke="{c}" '
               'stroke-width="1.1" stroke-linecap="round"/></svg>'),
 

@@ -408,6 +408,48 @@ def main() -> int:
         produced.append(p)
         dlg.reject()
 
+    def shoot_history() -> None:
+        """提交历史窗口（两栏）+ 工具栏的「关闭」按钮。"""
+        from app.widgets.historydialog import HistoryDialog
+
+        group = {'id': 'demo', 'name': '示例分组',
+                 'repo': 'freedom0213/FreePushNote-test2', 'branch': 'main'}
+        dlg = HistoryDialog(group, win)
+        sha = 'b0b75e4' + '0' * 33
+        dlg.set_commits({
+            'ok': True, 'reason': 'ok', 'rev': 'HEAD', 'message': '',
+            'commits': [
+                {'sha': sha, 'short': 'b0b75e4', 'when': '10-13 19:49',
+                 'author': 'freedom0213', 'message': '更新 验收笔记A'},
+                {'sha': 'e5def28' + '0' * 33, 'short': 'e5def28',
+                 'when': '10-13 19:41', 'author': 'freedom0213',
+                 'message': 'test2'},
+                {'sha': '765dc12' + '0' * 33, 'short': '765dc12',
+                 'when': '10-13 19:27', 'author': 'freedom0213',
+                 'message': '更新 验收笔记A'},
+            ]})
+        # 用真实的 git show 输出过一遍 _tidy_patch，截图才等于用户看到的样子
+        from core import pipeline as _pl
+        dlg.set_patch(sha, _pl._tidy_patch(
+            'diff --git a/验收笔记A.txt b/验收笔记A.txt\n'
+            'index 8c1f2ab..b0b75e4 100644\n'
+            '--- a/验收笔记A.txt\n'
+            '+++ b/验收笔记A.txt\n'
+            '@@ -6,3 +6,5 @@\n'
+            ' （这一篇会纳入 GitHub 管理。）\n'
+            '+1\n'
+            '+2\n'))
+        dlg.setModal(False)
+        dlg.show()
+        app.processEvents()
+        p = out_dir / 'ui_28_history.png'
+        dlg.grab().save(str(p))
+        produced.append(p)
+        dlg.reject()
+
+        win.toolbar.grab().save(str(out_dir / 'ui_29_toolbar.png'))
+        produced.append(out_dir / 'ui_29_toolbar.png')
+
     def shoot_welcome() -> None:
         """V3-10：什么都还没开始时的欢迎态（对比 V3-11 的日常空态）。
 
@@ -463,6 +505,7 @@ def main() -> int:
         shoot_pull()
         shoot_settings()
         shoot_newfiles()
+        shoot_history()
 
         dlg = GitHubAuthDialog(win)
         dlg.setModal(False)
