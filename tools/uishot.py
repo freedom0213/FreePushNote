@@ -302,6 +302,12 @@ def main() -> int:
                          'FreePushNote-test1.git/\n'
                          'Recv failure: Connection was reset (10054)')),
         ]
+        # 首次对接的提示（文案来自真实函数，不另抄一份 —— 否则截图会失真）
+        from app.window import remote_ahead_prompt
+        _t, _b, _ok = remote_ahead_prompt({'behind': 9, 'first_time': True})
+        shots.append(('ui_27_remote_first.png',
+                      dict(title=_t, body=_b, kind='info',
+                           ok_text=_ok, cancel_text='稍后再说')))
         for name, kwargs in shots:
             dlg = NoticeDialog(win, **kwargs)
             dlg.setModal(False)

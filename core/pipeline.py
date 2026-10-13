@@ -641,7 +641,12 @@ def _prune_backups(keep: int = BACKUP_KEEP) -> None:
 def check_remote(group: dict, *, token: str | None = None, on_log=None) -> dict:
     """推送前看一眼：远端有没有我们这个分支上没有的提交。
 
-    只 ``fetch`` + 比较计数，**不动任何文件**。返回 ``{'ok','ahead','behind','message'}``。
+    只 ``fetch`` + 比较计数，**不动任何文件**。返回
+    ``{'ok','ahead','behind','first_time','message'}``。
+
+    ``first_time`` 表示这个工作区还没有任何提交（这个文件夹还没推送过）——
+    此时 ``behind`` 是「远端本来就有多少提交」，不是「远端多了多少」，
+    调用方**不能**把它当成「别人改了你的笔记」来说。
 
     ``ok=False`` 表示「没检查成」（没网 / 没授权），不是「远端有新东西」——
     调用方**不要**因此拦住推送：真正的失败留给 push 那一步去报，
@@ -667,7 +672,11 @@ def check_remote(group: dict, *, token: str | None = None, on_log=None) -> dict:
 
     ahead, behind = gitops.ahead_behind(ws, branch)
     log(f'远端状态：本地领先 {ahead}，落后 {behind}')
-    return {'ok': True, 'ahead': ahead, 'behind': behind, 'message': ''}
+    return {'ok': True, 'ahead': ahead, 'behind': behind, 'message': '',
+            # 工作区一次提交都没有 = 这个文件夹还从没推送过（首次对接一个
+            # 已有内容的仓库）。此时「落后 N」与「远端真的多了提交」数字一样、
+            # 含义完全不同，界面必须分开措辞。
+            'first_time': not gitops.head_exists(ws)}
 
 
 def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan:

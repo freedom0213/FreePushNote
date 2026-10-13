@@ -564,6 +564,33 @@ def test_pull(bare: Path) -> None:
                                    retries=1)
         check('拉取前置：基线推送成功', base.ok, f'{base.reason} / {base.detail}')
 
+        info1 = pipeline.check_remote(group, token='fake-token')
+        check('推送过一次之后不再算「首次对接」',
+              info1.get('ok') and info1.get('first_time') is False, str(info1))
+        check('推送后与远端一致（0/0）',
+              (info1.get('ahead'), info1.get('behind')) == (0, 0), str(info1))
+
+        # ── 首次对接：同一个仓库，换一个从没推过的本地文件夹 ──
+        # 真机里踩到的场景：把一个**已经有很多提交**的仓库接到一个新的文件夹上。
+        # 此时 behind 是「远端本来有多少提交」，不是「远端多了多少」——
+        # 界面靠 first_time 分辨这两者，否则用户会以为自己的笔记被别人改过。
+        fresh = _TMP / '首次对接的文件夹'
+        fresh.mkdir(parents=True, exist_ok=True)
+        (fresh / '本地笔记.txt').write_text('本地本来就有的一行\n',
+                                            encoding='utf-8', newline='\n')
+        fg = config.new_group(fresh)
+        fg.update({'id': 'freshbind', 'repo': group['repo'], 'branch': 'main',
+                   'site': False, 'files': ['本地笔记.txt']})
+        # check_remote 内部会 prepare_workspace（建库 + 接远端），所以直接调即可
+        info_f = pipeline.check_remote(fg, token='fake-token')
+        check('首次对接能被识别（工作区还没有任何提交）',
+              info_f.get('ok') and info_f.get('first_time') is True, str(info_f))
+        check('首次对接时 behind 是远端的提交总数（>0）',
+              int(info_f.get('behind') or 0) > 0, str(info_f))
+        check('首次对接时不会把本地已有的文件判成「本地没改过」',
+              (fresh / '本地笔记.txt').read_text(encoding='utf-8')
+              == '本地本来就有的一行\n')
+
         # ── 「另一台电脑」在远端做改动 ──
         other = _TMP / '另一台电脑'
         gitops.git(_TMP, 'clone', bare.as_uri(), str(other))

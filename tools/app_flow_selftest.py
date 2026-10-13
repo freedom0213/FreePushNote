@@ -442,6 +442,40 @@ def _test_notice(app) -> None:
     check('确认模式给两个按钮', buttons3 == {'取消', '退出登录'}, str(buttons3))
 
 
+def _test_remote_ahead_prompt(win) -> None:
+    """[24] 「远端领先」提示：**首次对接**与「远端真被改过」必须分开说。
+
+    两者的落后数字一样，含义完全不同：前者是这个文件夹还从没推送过
+    （工作区一次提交都没有），后者才是远端真有新内容。共用一句话会让用户
+    以为自己的笔记被别人改过 —— 真机反馈里就是这么困惑的。
+    """
+    print('\n[24] 远端领先时的提示文案')
+    from app.window import remote_ahead_prompt
+    from app.widgets.notice import NoticeDialog
+
+    t1, b1, o1 = remote_ahead_prompt({'behind': 9, 'first_time': True})
+    check('首次对接：标题说「仓库里已经有内容」', '已经有内容' in t1, t1)
+    check('首次对接：说明这个文件夹还没推送过', '还从没推送过' in b1, b1[:60])
+    check('首次对接：明说不会改动笔记', '不会改动你的笔记' in b1, b1[:120])
+    check('首次对接：告诉用户对齐后要再点一次推送', '再点一次' in b1, b1[-45:])
+    check('首次对接：主按钮是「现在对齐」', o1 == '现在对齐', o1)
+    check('首次对接：不再出现「是本地没有的」这种吓人说法',
+          '本地没有' not in b1, b1)
+
+    t2, b2, o2 = remote_ahead_prompt({'behind': 2, 'first_time': False})
+    check('非首次：标题仍是「远端有新的改动」', t2 == '远端有新的改动', t2)
+    check('非首次：主按钮是「现在拉取」', o2 == '现在拉取', o2)
+    check('两种情形的文案确实不同', (t1, b1) != (t2, b2))
+
+    # 这段是目前最长的一则正文，得确认它不会把对话框撑出屏幕
+    dlg = NoticeDialog(None, t1, b1, kind='info', ok_text=o1,
+                       cancel_text='稍后再说')
+    texts = ' | '.join(w.text() for w in dlg.findChildren(QLabel))
+    check('首次对接的正文进了界面', '还从没推送过' in texts, texts[:80])
+    check('对话框没有高到撑出屏幕', dlg.height() < 600,
+          f'{dlg.width()}x{dlg.height()}')
+
+
 def _test_diff_preview(win) -> None:
     """[19] 查看差异：本地 ↔ 仓库（独立目录，不依赖前面的推送流程）。"""
     print('\n[19] 查看差异（本地 ↔ 仓库）')
@@ -1154,6 +1188,7 @@ def main() -> int:  # noqa: C901
     _test_findbar(win, app)
     _test_layout_order(win)
     _test_notice(app)
+    _test_remote_ahead_prompt(win)
     _test_diff_preview(win)
     _test_pull_ui(win)
     _test_settings_ui(win, app)

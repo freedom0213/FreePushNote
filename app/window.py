@@ -125,6 +125,39 @@ def _refs_stamp(ws: Path) -> tuple | None:
     return tuple(parts) or None
 
 
+def remote_ahead_prompt(info: dict) -> tuple[str, str, str]:
+    """远端领先时提示什么。返回 ``(标题, 正文, 主按钮文案)``。
+
+    **首次对接**与「远端真的有新内容」必须分开说 —— 两者的落后数字一样，
+    含义却完全不同：
+
+    * ``first_time``：这个文件夹还从没推送过（工作区一次提交都没有），
+      而仓库本来就有内容。用户什么都没做错，也没有任何人的笔记被改。
+    * 否则：远端确实多了提交（比如在另一台电脑推过、或在网页上改过）。
+
+    共用一句话（原来就是），用户看到「远端有 N 个提交是本地没有的」会以为
+    **自己的笔记被别人改过**，然后不敢往下点。
+    """
+    behind = int(info.get('behind', 0) or 0)
+    if info.get('first_time'):
+        return (
+            '这个仓库里已经有内容',
+            f'这个文件夹还从没推送过，而仓库里已经有 {behind} 个提交。\n\n'
+            'GitHub 不允许直接覆盖已有内容，所以要先对齐一次，之后就能正常推送。\n\n'
+            '对齐不会改动你的笔记：本地已有的文件，内容一致就原样保留，'
+            '不一致时保留你的版本。\n\n'
+            '对齐完成后，回来再点一次「推送到 GitHub」就能推上去。',
+            '现在对齐',
+        )
+    return (
+        '远端有新的改动',
+        f'GitHub 上已经有 {behind} 个提交是本地没有的。\n\n'
+        '直接推送会被 GitHub 拒绝 —— 它不允许覆盖别处的改动。'
+        '先把远端的内容拉下来，再推送。',
+        '现在拉取',
+    )
+
+
 class _EmptyState(QWidget):
     """编辑区空态：没有打开文件时给一句引导，而不是留一块空白。"""
 
@@ -1082,11 +1115,11 @@ class FreePushWindow(QWidget):
                 # 自动推送时不能弹窗打断打字：安静地不做，用户手动点推送时
                 # 还会看到同样的提示。右栏此刻显示「有改动待推送」，是诚实的。
                 return
-            if ask(self, '远端有新的改动',
-                   f'GitHub 上已经有 {behind} 个提交是本地没有的。\n\n'
-                   '直接推送会被 GitHub 拒绝 —— 它不允许覆盖别处的改动。'
-                   '先把远端的内容拉下来，再推送。',
-                   ok_text='现在拉取', cancel_text='稍后再说', kind='warning'):
+            title, body, ok_text = remote_ahead_prompt(info)
+            # 首次对接不是「出问题了」，用中性的信息色；远端真被改过才用警告色
+            kind = 'info' if info.get('first_time') else 'warning'
+            if ask(self, title, body, ok_text=ok_text,
+                   cancel_text='稍后再说', kind=kind):
                 self.on_pull()
             return
 
