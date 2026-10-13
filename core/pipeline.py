@@ -275,7 +275,11 @@ def stage_group(group: dict, *, names: list[str] | None = None,
                            detail=str(exc), warnings=warnings, site_stats=site_stats)
 
     note_paths, artifact_paths = _split_changes(changes, picked, site_stats)
-    return StageResult(ok=True, workspace=ws, files=picked, changes=changes,
+    # reason 必须显式写：这个字段的**默认值是 REASON_GIT_ERROR**（给「不 ok」
+    # 的结果兜底用），成功路径漏传就会变成「ok=True 但 reason=git_error」——
+    # 字段说谎是最难查的一类问题，日志里一眼看到才发现。
+    return StageResult(ok=True, reason=REASON_OK, workspace=ws, files=picked,
+                       changes=changes,
                        has_changes=bool(changes), warnings=warnings,
                        site_stats=site_stats, note_paths=note_paths,
                        artifact_paths=artifact_paths)

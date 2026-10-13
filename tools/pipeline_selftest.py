@@ -443,6 +443,10 @@ def test_full_push(folder: Path, bare: Path) -> None:
         staged = pipeline.stage_group(group, account={'login': 'freedom0213', 'id': 1},
                                       on_log=lambda *_a: None)
         check('stage_group 成功', staged.ok, staged.detail)
+        # reason 的默认值是 REASON_GIT_ERROR（给失败结果兜底），成功路径漏传
+        # 就会变成「ok=True 但 reason=git_error」—— 字段说谎最难查
+        check('成功时 reason 是 ok（不是默认的 git_error）',
+              staged.reason == pipeline.REASON_OK, staged.reason)
         check('stage 不过网也不提交（has_changes 只表示“有东西要推”）',
               staged.has_changes and bool(staged.workspace))
         row = next((c for c in staged.changes if c['name'] == '读书笔记.txt'), None)
