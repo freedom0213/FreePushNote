@@ -20,7 +20,7 @@ from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtGui import QFont, QGuiApplication  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from app import theme  # noqa: E402
+from app import diag, theme  # noqa: E402
 from app.window import FreePushWindow  # noqa: E402
 from core import config as core_config  # noqa: E402
 
@@ -38,15 +38,16 @@ def _install_crash_log() -> None:
     from datetime import datetime
 
     def hook(exc_type, exc, tb) -> None:
+        text = ''.join(traceback.format_exception(exc_type, exc, tb))
         try:
             log_dir = core_config.CONFIG_DIR / 'logs'
             log_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-            (log_dir / f'crash-{stamp}.log').write_text(
-                ''.join(traceback.format_exception(exc_type, exc, tb)),
-                encoding='utf-8')
+            (log_dir / f'crash-{stamp}.log').write_text(text, encoding='utf-8')
         except Exception:       # noqa: BLE001 - 记日志本身绝不能把程序带崩
             pass
+        # 同时写进当天的会话日志：一个文件里就能看到「走到哪 + 怎么崩的」
+        diag.note('未捕获异常（另存了 crash 文件）：' + text)
         sys.__excepthook__(exc_type, exc, tb)
 
     sys.excepthook = hook
@@ -72,11 +73,18 @@ def build_app(argv: list[str] | None = None) -> QApplication:
 
 
 def main() -> int:
+    # 第一件事就是开现场记录：pythonw 没有控制台，崩了之后这是唯一的线索来源
+    diag.enable()
+    diag.note(f'FreePushNote {core_config.APP_VERSION} 启动'
+              f' · config={core_config.CONFIG_DIR}')
     _install_crash_log()
     app = build_app()
     window = FreePushWindow()
     window.show()
-    return app.exec()
+    diag.note('主窗口已显示，进入事件循环')
+    code = app.exec()
+    diag.note(f'事件循环正常退出，code={code}')
+    return code
 
 
 if __name__ == '__main__':

@@ -45,7 +45,7 @@ if _IS_WINDOWS:
 from core import config as core_config
 from core import gitops, pipeline
 
-from . import account as account_mod, fileio, icons, theme
+from . import account as account_mod, diag, fileio, icons, theme
 from .widgets.accountdialog import AccountDialog
 from .widgets.authdialog import GitHubAuthDialog
 from .widgets.diffdialog import DiffDialog
@@ -940,6 +940,9 @@ class FreePushWindow(QWidget):
 
         三种情况分别导向：先绑账号 / 先纳管 / 真的推送。用户只管点同一个按钮。
         """
+        diag.note(f'on_push 被点击 · account='
+                  f'{self._account.login if self._account else None}'
+                  f' · file={self._current.name if self._current else None}')
         if self._push_busy:
             return
         if self._account is None:
@@ -955,6 +958,8 @@ class FreePushWindow(QWidget):
             group = self.manage_current_folder(existing=group)
             if group is None:
                 return
+        diag.note(f'on_push → do_push · group={group.get("id")}'
+                  f' repo={group.get("repo")} files={group.get("files")}')
         self.do_push(group)
 
     # ───────────────────────── 纳管与推送 ─────────────────────────
@@ -1022,6 +1027,7 @@ class FreePushWindow(QWidget):
         若放到确认层之后，勾选的新文件这次进不了工作区，用户得再推一遍。
         """
         if self._push_silent:
+            diag.note('S-02 跳过（自动推送，不弹窗）')
             self._stage_group(group)          # 保存后自动推送：不弹窗打断打字
             return
 
@@ -1029,21 +1035,29 @@ class FreePushWindow(QWidget):
             fresh = pipeline.new_files(group)
         except Exception:                     # noqa: BLE001
             fresh = []                        # 扫不动就当没有，别挡着推送
+        diag.note(f'S-02 扫描完成 · 未纳管 {len(fresh)} 篇 {[f["name"] for f in fresh]}')
         if not fresh:
             self._stage_group(group)
             return
 
         self.panel.set_progress(None)
         dlg = NewFilesDialog(fresh, group, self)
+        diag.note('S-02 面板弹出，等用户选择')
         if dlg.exec() != QDialog.Accepted:
             # 直接关掉 = 这次不推了。关闭一个对话框不该悄悄把东西推上去。
+            diag.note('S-02 被关闭 → 取消这次推送')
             self._abort_push()
             return
+        diag.note(f'S-02 选择 · mode={dlg.mode} picked={dlg.picked}'
+                  f' skipped={dlg.skipped}')
         group = self._apply_new_files(group, dlg)
+        diag.note(f'S-02 落库后 files={group.get("files")}'
+                  f' ignored={group.get("ignored")}')
         self._stage_group(group)
 
     def _abort_push(self) -> None:
         """用户中途取消：把忙碌状态收干净，界面回到可操作的样子。"""
+        diag.note('推送中止（用户取消）')
         self._push_busy = False
         self._busy_kind = None
         self.panel.set_progress(None)
@@ -1127,6 +1141,9 @@ class FreePushWindow(QWidget):
 
     def _on_stage_done(self, staged) -> None:
         """整理完成：要么直接失败，要么弹确认层让用户过目这次要推什么。"""
+        diag.note(f'整理完成 · ok={staged.ok} reason={staged.reason}'
+                  f' has_changes={getattr(staged, "has_changes", None)}'
+                  f' message={staged.message!r}')
         self._push_busy = False
         self.panel.set_progress(None)
 
@@ -1171,8 +1188,14 @@ class FreePushWindow(QWidget):
     def _push_log(self, text: str) -> None:
         self._push_log_lines.append(str(text))
         del self._push_log_lines[:-200]
+        # 同一句话也写进当天的会话日志：万一下一步进程被 abort() 带走，
+        # 这个文件的最后一行就是「当时走到哪」—— 硬崩溃唯一能留下的现场。
+        diag.note('步骤 | ' + str(text).replace('\n', ' ⏎ '))
 
     def _on_push_done(self, result) -> None:
+        diag.note(f'推送结束 · ok={result.ok} commit={getattr(result, "commit", "")}'
+                  f' reason={getattr(result, "reason", "")}'
+                  f' message={getattr(result, "message", "")!r}')
         self._push_busy = False
         self.panel.set_progress(None)
         self._refresh_all()

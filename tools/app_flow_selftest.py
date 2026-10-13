@@ -476,6 +476,35 @@ def _test_remote_ahead_prompt(win) -> None:
           f'{dlg.width()}x{dlg.height()}')
 
 
+def _test_diag(win) -> None:
+    """[25] 崩溃现场记录：没有控制台时也要留下线索。
+
+    真机那次崩溃是 `abort()`（Windows 上 `0xC0000409`），**根本不给 Python 的
+    异常钩子机会** —— 所以最低要求是「进程走过每一步都写进文件」：
+    日志的最后一行就是现场。这里锁住这套机制，免得以后被改回去。
+    """
+    print('\n[25] 崩溃现场记录（diag）')
+    from app import diag
+
+    diag.note('未启用时这条不该被写进任何地方')     # 也不该抛异常
+    check('未启用时 note() 是空操作（自测不被写文件打扰）',
+          diag._ENABLED is False, str(diag._ENABLED))
+
+    path = diag.enable(redirect=False, install_handlers=False)
+    try:
+        check('enable() 在配置目录下建了日志',
+              bool(path) and str(path).endswith('.log') and 'logs' in str(path),
+              str(path))
+        diag.note('测试标记 ABC')
+        text = Path(str(path)).read_text(encoding='utf-8')
+        check('note() 真的落盘了', '测试标记 ABC' in text, text[-120:])
+        check('日志开头有会话标记（便于确认是哪一次运行）',
+              '会话开始' in text, text[:120])
+    finally:
+        diag.disable()
+    check('disable() 之后停止写入', diag._ENABLED is False, str(diag._ENABLED))
+
+
 def _test_diff_preview(win) -> None:
     """[19] 查看差异：本地 ↔ 仓库（独立目录，不依赖前面的推送流程）。"""
     print('\n[19] 查看差异（本地 ↔ 仓库）')
@@ -1189,6 +1218,7 @@ def main() -> int:  # noqa: C901
     _test_layout_order(win)
     _test_notice(app)
     _test_remote_ahead_prompt(win)
+    _test_diag(win)
     _test_diff_preview(win)
     _test_pull_ui(win)
     _test_settings_ui(win, app)
