@@ -1,5 +1,11 @@
 @echo off
-rem FreePushNote 启动入口（双击即可）。用 pythonw 启动，不弹控制台窗口。
+rem FreePushNote launcher. Double click this file, or run it from a shell.
+rem Starts the app with pythonw so no console window stays open.
+rem
+rem KEEP THIS FILE PURE ASCII (English only) AND USE CRLF LINE ENDINGS.
+rem cmd.exe reads a .bat byte by byte using the console codepage. Non-ASCII
+rem comments get garbled on a GBK console, and the leftovers are then executed
+rem as commands ("xxx is not recognized as an internal or external command").
 cd /d "%~dp0"
 
 if not exist ".venv\Scripts\pythonw.exe" (

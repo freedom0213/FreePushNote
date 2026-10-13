@@ -131,6 +131,26 @@ python -m venv .venv
 run.bat
 ```
 
+### 想用一套独立的配置试功能
+
+数据目录默认是 `~/.pushnote`。想拿一份干净配置跑（比如看「首次启动」长什么样），
+用环境变量把它指到别处即可 —— 四套自测就是用这个变量做隔离的：
+
+```bat
+:: cmd
+set PUSHNOTE_HOME=D:\pushnote-试
+run.bat
+```
+
+```powershell
+# PowerShell：set 在这里是 Set-Variable，**不会**设置环境变量，必须写 $env:
+$env:PUSHNOTE_HOME = 'D:\pushnote-试'
+.\run.bat
+```
+
+> `run.bat` 里**只能出现 ASCII 字符**。cmd.exe 是按控制台编码逐字节读 .bat 的，
+> 中文注释在 GBK 控制台下会被读乱，残渣还会被当成命令去执行。
+
 ## 打包
 
 ```bat
