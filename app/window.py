@@ -161,6 +161,53 @@ def remote_ahead_prompt(info: dict) -> tuple[str, str, str]:
     )
 
 
+def outside_prompt(plan, notes: str = '') -> tuple[str, str, str]:
+    """「远端改了、但本地不用写回」的提示文案，返回 ``(标题, 正文, 种类)``。
+
+    🔴 必须分两类说，因为后果**相反**：
+
+    * **本工具生成的产物**（站点文件、每篇笔记的页面）—— 下次推送会按原文重新
+      生成，所以在网页上改它们等于白改；
+    * **仓库里本来就有的其他文件**（LICENSE / tools/ / 手写 .md）—— 不归本工具管，
+      **一个都不碰**：既不会被覆盖，也不会被删掉。
+
+    以前这两类混在一句「自动生成的文件」里、还统一说"会被覆盖"。P0 改完之后那句话
+    对第二类就是错的（它恰恰不会被覆盖），所以这里分开讲。
+
+    提成纯函数是为了能被自测直接断言、也能被截图脚本直接调用 —— 否则截图里的文案
+    会是另抄一份，等于在展示一个不存在的界面。
+    """
+    generated = list(getattr(plan, 'generated', None) or [])
+    foreign = list(getattr(plan, 'foreign', None) or [])
+
+    def _list(paths: list[str], limit: int = 8) -> str:
+        lines = '\n'.join(f'· {p}' for p in paths[:limit])
+        if len(paths) > limit:
+            lines += f'\n· 等共 {len(paths)} 个'
+        return lines
+
+    head = (f'远端有 {plan.behind} 个新提交，但没有改到你纳管的笔记原文'
+            + (f'（{notes}）' if notes else '')
+            + '，所以本地不需要写回。')
+
+    if foreign:
+        body = [head, '',
+                '这些是仓库里不属于本工具管理的文件，我们不会改动它们：', '',
+                _list(foreign)]
+        if generated:
+            body += ['', '另外这些自动生成的站点文件会在你下次推送时重新生成，'
+                         '在网页上改它们会被覆盖：', '', _list(generated)]
+        body += ['', '要改笔记内容，请改 .txt 原文。']
+        return '远端有了新的提交', '\n'.join(body), 'info'
+
+    return ('远端只改了自动生成的文件',
+            head + '\n\n这些是自动生成的站点文件：\n\n' + _list(generated)
+            + '\n\n它们每次推送都会按笔记原文重新生成 —— 换句话说，'
+              '在 GitHub 网页上对它们的修改，会在你下次推送时被覆盖。'
+              '要改内容，请改 .txt 原文。',
+            'warning')
+
+
 class _EmptyState(QWidget):
     """编辑区空态：没有打开文件时给一句引导，而不是留一块空白。"""
 
@@ -1471,23 +1518,14 @@ class FreePushWindow(QWidget):
             notice(self, '本地有还没推上去的改动', plan.message, kind='warning')
             return
         if plan.reason == pipeline.REASON_ARTIFACTS_ONLY:
-            # 远端确实有新提交，但改的全是自动生成的站点文件。
+            # 远端确实有新提交，但没有改到纳管的笔记原文。
             # 两件事都要做：① 让用户看懂为什么本地没变化；② 仍然对齐中转区，
             # 否则推送会被「远端领先」拦住，用户就卡在来回提示里出不来。
             group = self._pull_group or self._current_group()
             if group:
                 pipeline.apply_pull(group, plan, on_log=self._push_log)
             self._refresh_all()
-            lines = '\n'.join(f'· {p}' for p in plan.outside[:8])
-            notice(self, '远端只改了自动生成的文件',
-                   f'远端有 {plan.behind} 个新提交，但它们改的是这些自动生成的文件：\n\n'
-                   f'{lines}\n\n'
-                   f'你的笔记原文（{"、".join(core_config.managed_names(group))}）'
-                   f'没有变化，所以本地不需要写回。\n\n'
-                   f'这些生成文件每次推送都会按笔记原文重新生成 —— '
-                   f'换句话说，在 GitHub 网页上对它们的修改，'
-                   f'会在你下次推送时被覆盖。要改内容，请改 .txt 原文。',
-                   kind='warning')
+            self._notice_outside(plan, group)
             return
 
         group = self._pull_group or self._current_group() or {}
@@ -1682,6 +1720,12 @@ class FreePushWindow(QWidget):
         self._refresh_encoding()
         diag.note(f'编码已转为 UTF-8：{self._current.name}')
         self.on_push()
+
+    def _notice_outside(self, plan, group: dict | None) -> None:
+        """说明「远端改了、但本地不用写回」的那些路径（文案见 :func:`outside_prompt`）。"""
+        notes = '、'.join(core_config.managed_names(group)) if group else ''
+        title, body, kind = outside_prompt(plan, notes)
+        notice(self, title, body, kind=kind)
 
     def open_settings(self) -> None:
         """设置页（设计稿 V3-09）。四张卡片：账号 / 受管理的文件夹 / 推送行为 / 关于。"""

@@ -648,6 +648,12 @@ class PullPlan:
     #: 远端新提交里、**不属于**本次同步范围的路径（自动生成的站点文件等）。
     #: 这些不会被拉回本地，也不该被拉回 —— 但必须让用户知道它们的存在。
     outside: list[str] = field(default_factory=list)
+    #: ``outside`` 里属于**本工具产出**的那部分（站点文件、每篇笔记的页面）
+    generated: list[str] = field(default_factory=list)
+    #: ``outside`` 里**仓库里本来就有的其他文件**（LICENSE / tools/ / 手写 .md）
+    #: ⚠️ 与 generated 的后果完全相反：后者会被下次推送重新生成覆盖，
+    #: 前者**一个都不碰**（见 pushed_paths）。混为一谈就是撒谎。
+    foreign: list[str] = field(default_factory=list)
 
     @property
     def updated(self) -> list[PullFile]:
@@ -860,6 +866,41 @@ def commit_patch(group: dict, sha: str, on_log=None) -> str:
     return _tidy_patch(gitops.commit_diff(ws, sha))
 
 
+#: 站点生成器固定产出的文件名（与 core/site.py 的 build_notes_site 对应）
+SITE_FIXED_NAMES = frozenset({
+    'index.html', 'index.md', 'README.md', '_sidebar.md', '.nojekyll',
+})
+
+
+def is_our_artifact(group: dict, path: str,
+                    picked: list[str] | None = None) -> bool:
+    """这个路径是不是**本工具产出**的东西（而不是仓库里本来就有的其他文件）。
+
+    用途：Pull 时把「远端改过、但我们不同步的路径」分成两类说清楚 ——
+    生成物会被下次推送重新生成覆盖，仓库里其他文件我们**一个都不碰**。
+    这两件事的后果完全相反，混在一句话里说就是撒谎（P0 改完之后尤其明显：
+    以前 LICENSE 会被删掉，现在不会了，而旧文案还在说"会被覆盖"）。
+
+    判据优先用 ``pushed_paths``（上次推送后本工具产出过什么的权威记录）；
+    没有那份记录时退回名字规则。**保守方向永远是"算成别人的文件"** ——
+    那样最坏也只是把一句说明说得含糊，而反过来会误导用户以为文件会被覆盖。
+    """
+    p = str(path).replace('\\', '/')
+    if p in set(config.pushed_paths(group)):
+        return True
+    name = Path(p).name
+    if name in SITE_FIXED_NAMES:
+        return True
+    docs = str(group.get('docs_dir') or '').strip('/\\')
+    assets_prefix = f'{docs}/assets/' if docs else 'assets/'
+    if p.startswith(assets_prefix):
+        return True
+    # 每篇笔记会生成一个同名（清洗过）的页面：<slug>.md
+    names = picked if picked is not None else config.managed_names(group)
+    return (Path(p).suffix.lower() == '.md'
+            and Path(p).stem in {Path(str(n)).stem for n in names})
+
+
 def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan:
     """分析一次拉取：谁会更新、谁要合并、谁冲突。**不改任何文件。**"""
     log = on_log or (lambda *_a, **_k: None)
@@ -917,6 +958,11 @@ def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan
     changed = gitops.diff_names(ws, f'{base_rev}..{remote_rev}')
     picked_set = set(picked)
     outside = [p for p in changed if p not in picked_set]
+    # 再分成两类：本工具生成的产物 / 仓库里本来就有的其他文件。
+    # 后果完全相反，界面上必须分开说（见 is_our_artifact）。
+    mine = {p: is_our_artifact(group, p, picked) for p in outside}
+    generated = [p for p in outside if mine[p]]
+    foreign = [p for p in outside if not mine[p]]
 
     for name in picked:
         src = folder / name
@@ -954,12 +1000,14 @@ def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan
 
     if not writes and not any(f.action == 'conflict' for f in files):
         if outside:
-            # 远端确实有提交，但改的都不是笔记原文 —— 说白了：改的是成果物。
+            # 远端确实有提交，但改的都不是笔记原文 —— 说白了：改的是别的东西。
             # 不能用「已经是最新」这种说法糊过去，用户会觉得软件在骗他。
+            # 到底改的是"我们的生成物"还是"仓库里别人的文件"，交给界面分开说。
             return PullPlan(ok=True, reason=REASON_ARTIFACTS_ONLY,
                             ahead=ahead, behind=behind,
                             remote_rev=remote_rev, files=files, outside=outside,
-                            message='远端的新提交只改了自动生成的文件。')
+                            generated=generated, foreign=foreign,
+                            message='远端的新提交没有改到你纳管的笔记原文。')
         return PullPlan(ok=True, reason=REASON_UP_TO_DATE, ahead=ahead, behind=behind,
                         remote_rev=remote_rev, files=files,
                         message='远端没有新的内容。')
@@ -967,7 +1015,8 @@ def plan_pull(group: dict, *, token: str | None = None, on_log=None) -> PullPlan
     reason = REASON_CONFLICT if any(f.action == 'conflict' for f in files) else REASON_OK
     return PullPlan(ok=True, reason=reason, ahead=ahead, behind=behind,
                     base_rev=base_rev, remote_rev=remote_rev,
-                    files=files, writes=writes, original=original, outside=outside)
+                    files=files, writes=writes, original=original, outside=outside,
+                    generated=generated, foreign=foreign)
 
 
 def apply_pull(group: dict, plan: PullPlan, *, on_log=None) -> PullResult:

@@ -693,14 +693,26 @@ def _test_pull_ui(win) -> None:
     texts2 = ' | '.join(w.text() for w in dlg2.findChildren(QLabel))
     check('没有冲突时不出现「有冲突」组', '有冲突' not in texts2, texts2[:140])
 
-    # ── 远端只改了生成物：不能笼统说「已经是最新」 ──
+    # ── 远端改的不是笔记原文：不能笼统说「已经是最新」，而且要分两类说 ──
     check('远端只改生成物有专门的结果种类',
           pipeline.REASON_ARTIFACTS_ONLY != pipeline.REASON_UP_TO_DATE)
     plan3 = PullPlan(ok=True, reason=pipeline.REASON_ARTIFACTS_ONLY, behind=1,
-                     remote_rev='origin/main', outside=['X.md'])
+                     remote_rev='origin/main', outside=['X.md'], generated=['X.md'])
     texts3 = ' | '.join(w.text() for w in PullDialog(plan3, win).findChildren(QLabel))
-    check('确认层会单列「不会同步」的文件', '不会同步' in texts3, texts3[:160])
+    check('确认层单列「会被重新生成」的文件', '会被重新生成' in texts3, texts3[:160])
     check('并说明会被下次推送覆盖', '下次推送会被覆盖' in texts3, texts3[:200])
+
+    # 🔴 不归本工具管的文件：后果与生成物**相反** —— 不会被覆盖、也不会被删
+    plan4 = PullPlan(ok=True, reason=pipeline.REASON_ARTIFACTS_ONLY, behind=3,
+                     remote_rev='origin/main',
+                     outside=['LICENSE', 'tools/sync.py'],
+                     foreign=['LICENSE', 'tools/sync.py'])
+    dlg4 = PullDialog(plan4, win)
+    texts4 = ' | '.join(w.text() for w in dlg4.findChildren(QLabel))
+    check('外来文件单独成组，不和生成物混在一起',
+          '不归本工具管' in texts4 and '会被重新生成' not in texts4, texts4[:200])
+    check('并且写明不会覆盖、也不会删',
+          '不会被覆盖，也不会被删掉' in texts4, texts4[:240])
 
     # ── 前置分支：都不该启动后台任务 ──
     # 未绑账号那条分支会打开授权对话框（还会真去申请设备码），

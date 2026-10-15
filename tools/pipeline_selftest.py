@@ -803,6 +803,50 @@ def test_pull(bare: Path) -> None:
               aligned == (0, 0), str(aligned))
         check('并且没有改写任何本地笔记', not res3.written and not res3.failed,
               f'{res3.written} / {res3.failed}')
+
+        # ── 远端改的是「仓库里其他人的文件」，不是生成物 ──
+        # 🔴 这两类的后果**相反**：生成物会被下次推送覆盖，外来文件一个都不碰。
+        # 混在一句「自动生成的文件」里说，就是在撒谎（P0 改完之后尤其明显）。
+        (other / 'LICENSE').write_text('另一个人的 LICENSE\n', encoding='utf-8')
+        (other / 'tools').mkdir(exist_ok=True)
+        (other / 'tools' / 'sync.py').write_text('print(1)\n', encoding='utf-8')
+        gitops.add_all(other)
+        gitops.commit(other, '加了仓库里本来就有的文件')
+        gitops.git(other, 'push', 'origin', 'main')
+
+        plan4 = pipeline.plan_pull(group, token='fake-token')
+        check('远端改外来文件时也走「不用写回」这条路',
+              plan4.ok and plan4.reason == pipeline.REASON_ARTIFACTS_ONLY,
+              f'{plan4.reason} / {plan4.message}')
+        check('外来文件被分到 foreign（而不是当成生成物）',
+              set(plan4.foreign) == {'LICENSE', 'tools/sync.py'},
+              f'foreign={plan4.foreign} generated={plan4.generated}')
+        check('生成物里不该混进外来文件',
+              not ({'LICENSE', 'tools/sync.py'} & set(plan4.generated)),
+              str(plan4.generated))
+        check('这种情形下本地笔记同样一律不动', not plan4.writes)
+        pipeline.apply_pull(group, plan4)
+
+        # ── 判据本身（纯函数，快）──
+        g = {'docs_dir': '', 'files': ['Java八股.txt', '读书笔记.txt'],
+             'pushed_paths': ['Java八股.txt', 'Java八股.md', 'index.html']}
+        check('站点固定产物算我们的',
+              all(pipeline.is_our_artifact(g, p) for p in
+                  ('index.html', '_sidebar.md', '.nojekyll', 'README.md')))
+        check('assets/ 下的资源算我们的',
+              pipeline.is_our_artifact(g, 'assets/docsify.min.js'))
+        check('笔记对应的页面算我们的',
+              pipeline.is_our_artifact(g, 'Java八股.md')
+              and pipeline.is_our_artifact(g, '读书笔记.md'))
+        check('pushed_paths 里有记录的一律算我们的',
+              pipeline.is_our_artifact(g, 'Java八股.txt'))
+        check('LICENSE / tools/ / 别人的 md / requirements.txt 都不算我们的',
+              not any(pipeline.is_our_artifact(g, p) for p in
+                      ('LICENSE', 'tools/sync.py', '别人的说明.md',
+                       'requirements.txt', '笔记备份.txt')))
+        check('没有记录时的兜底也是保守的（名字对不上就算别人的）',
+              not pipeline.is_our_artifact({'docs_dir': '', 'files': []}, 'LICENSE')
+              and pipeline.is_our_artifact({'docs_dir': '', 'files': []}, 'index.html'))
     finally:
         gitops.ensure_remote = real_ensure
 

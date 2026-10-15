@@ -504,6 +504,37 @@ def main() -> int:
         # 还原状态栏，别让后面的截图带着警告
         win.statusbar.set_encoding('UTF-8', warn=False)
         win.statusbar.set_eol('LF', warn=False)
+    def shoot_outside() -> None:
+        """Pull 的「生成物 / 别人的文件」两类，以及对应的提示框。"""
+        from app.widgets.notice import NoticeDialog
+        from app.widgets.pulldialog import PullDialog
+        from app.window import outside_prompt
+        from core.pipeline import REASON_ARTIFACTS_ONLY, PullPlan
+
+        plan = PullPlan(ok=True, reason=REASON_ARTIFACTS_ONLY, behind=3,
+                        remote_rev='origin/main',
+                        outside=['验收笔记A.md', 'index.html', '_sidebar.md',
+                                 'LICENSE', '笔记备份.txt', 'tools/sync.py'],
+                        generated=['验收笔记A.md', 'index.html', '_sidebar.md'],
+                        foreign=['LICENSE', '笔记备份.txt', 'tools/sync.py'])
+        dlg = PullDialog(plan, win)
+        dlg.setModal(False)
+        dlg.show()
+        app.processEvents()
+        p = out_dir / 'ui_33_pull_two_kinds.png'
+        dlg.grab().save(str(p))
+        produced.append(p)
+        dlg.reject()
+
+        title, body, kind = outside_prompt(plan, notes='验收笔记A.txt')
+        box = NoticeDialog(win, title=title, body=body, kind=kind)
+        box.setModal(False)
+        box.show()
+        app.processEvents()
+        p = out_dir / 'ui_34_notice_foreign.png'
+        box.grab().save(str(p))
+        produced.append(p)
+        box.reject()
     def shoot_welcome() -> None:
         """V3-10：什么都还没开始时的欢迎态（对比 V3-11 的日常空态）。
 
@@ -561,6 +592,7 @@ def main() -> int:
         shoot_newfiles()
         shoot_history()
         shoot_push_policy()
+        shoot_outside()
 
         dlg = GitHubAuthDialog(win)
         dlg.setModal(False)

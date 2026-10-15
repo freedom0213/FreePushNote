@@ -117,8 +117,24 @@ class PullDialog(QDialog):
 
         # 远端改了、但不打算同步的东西（自动生成的站点文件）。
         # 不说清楚，用户会以为「Pull 成功了，网页上的修改应该生效了」。
-        if plan.outside:
-            inner.addWidget(self._build_outside(plan.outside))
+        # 「不会同步」要分两类说：生成物会被下次推送重新生成覆盖，而仓库里
+        # 其他文件我们**一个都不碰**。两者的后果相反，混在一句里就是撒谎。
+        generated = list(getattr(plan, 'generated', None) or [])
+        foreign = list(getattr(plan, 'foreign', None) or [])
+        if generated or foreign or plan.outside:
+            # 老结果对象只有 outside 时（容错），一律当成生成物展示
+            if not generated and not foreign:
+                generated = list(plan.outside)
+        if generated:
+            inner.addWidget(self._build_outside(
+                generated, '会被重新生成',
+                '这些文件由笔记原文生成，每次推送都会重新生成；'
+                '在网页上直接改它们，下次推送会被覆盖。', theme.WARNING))
+        if foreign:
+            inner.addWidget(self._build_outside(
+                foreign, '不归本工具管',
+                '仓库里本来就有的文件。推送时不会改动它们 —— '
+                '既不会被覆盖，也不会被删掉。', theme.TEXT_SECOND))
 
         # ── 备份说明 ──
         note = QFrame()
@@ -190,19 +206,17 @@ class PullDialog(QDialog):
             b_lay.addLayout(row)
         return box
 
-    def _build_outside(self, paths: list[str]) -> QFrame:
-        """远端改了、但不会被同步的路径（自动生成的站点文件）。"""
+    def _build_outside(self, paths: list[str], title: str, hint: str,
+                       color: str) -> QFrame:
+        """远端改了、但不会被同步进本地的路径。"""
         box = QFrame()
         box.setObjectName('NoteWarn')
         b_lay = QVBoxLayout(box)
         b_lay.setContentsMargins(12, 10, 12, 10)
         b_lay.setSpacing(4)
-        b_lay.addWidget(_label(f'不会同步（{len(paths)} 个自动生成的文件）',
-                               theme.WARNING, theme.FS_TINY, 600))
-        b_lay.addWidget(_label(
-            '这些文件由笔记原文生成，每次推送都会重新生成；'
-            '在网页上直接改它们，下次推送会被覆盖。',
-            theme.TEXT_SECOND, theme.FS_LABEL))
+        b_lay.addWidget(_label(f'{title}（{len(paths)} 个）',
+                               color, theme.FS_TINY, 600))
+        b_lay.addWidget(_label(hint, theme.TEXT_SECOND, theme.FS_LABEL))
         for p in paths[:6]:
             b_lay.addWidget(_label(f'· {p}', theme.TEXT_FAINT, theme.FS_LABEL,
                                    mono=True))
