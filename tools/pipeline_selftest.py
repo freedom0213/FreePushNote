@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -114,6 +115,20 @@ def build_source_folder(root: Path) -> Path:
     # 不是笔记扩展名：连候选都不算
     (folder / 'key.txt.bak').write_text('backup', encoding='utf-8')
     return folder
+
+
+def push_and_remember(group: dict, **kwargs):
+    """推送，并像界面那样记住「本工具产出的路径」（对应 ``window._remember_pushed``）。
+
+    🔴 这份记录是**删除权限的唯一来源**：没有它，这次提交里所有"删除"都会被
+    当成"仓库里的外来文件"而保住（保守方向）。真实流程里由界面在推送成功后
+    写进分组配置，这里手动补上，好让"取消勾选 → 从仓库消失"这条设计意图
+    仍然被测试覆盖。
+    """
+    result = pipeline.push_group(group, **kwargs)
+    if result.ok and result.produced:
+        group['pushed_paths'] = list(result.produced)
+    return result
 
 
 def make_group(folder: Path, repo: str) -> dict:
@@ -363,10 +378,10 @@ def test_full_push(folder: Path, bare: Path) -> None:
     gitops.ensure_remote = local_remote
     try:
         logs: list[str] = []
-        result = pipeline.push_group(group, message='首次推送测试',
-                                     token='fake-token-not-used-for-file-remote',
-                                     account={'login': 'freedom0213', 'id': 184794503},
-                                     retries=1, on_log=logs.append)
+        result = push_and_remember(group, message='首次推送测试',
+                                   token='fake-token-not-used-for-file-remote',
+                                   account={'login': 'freedom0213', 'id': 184794503},
+                                   retries=1, on_log=logs.append)
 
         check('首次推送成功', result.ok, f'{result.reason} / {result.message} / {result.detail}')
         check('拿到了提交短哈希', bool(result.commit))
@@ -458,9 +473,9 @@ def test_full_push(folder: Path, bare: Path) -> None:
 
         # ── 取消勾选 → 文件应真的从仓库消失
         group['files'] = [n for n in group['files'] if n != '代码片段.txt']
-        result3 = pipeline.push_group(group, message='移除一个文件', token='x', retries=1,
-                                      account={'login': 'freedom0213', 'id': 1},
-                                      on_log=lambda *_a: None)
+        result3 = push_and_remember(group, message='移除一个文件', token='x', retries=1,
+                                    account={'login': 'freedom0213', 'id': 1},
+                                    on_log=lambda *_a: None)
         check('取消勾选后推送成功', result3.ok, result3.detail)
         tree3 = bare_tree(bare)
         check('被取消勾选的文件已从远端消失', '代码片段.txt' not in tree3)
@@ -468,7 +483,7 @@ def test_full_push(folder: Path, bare: Path) -> None:
         check('其余笔记仍在', '读书笔记.txt' in tree3)
 
         # ── 只推子集（设计稿 S-01 的勾选）
-        result4 = pipeline.push_group(
+        result4 = push_and_remember(
             group, message='只推一篇', names=['读书笔记.txt'], token='x', retries=1,
             account={'login': 'freedom0213', 'id': 1}, on_log=lambda *_a: None)
         check('只推子集能成功', result4.ok, result4.detail)
@@ -792,6 +807,151 @@ def test_pull(bare: Path) -> None:
         gitops.ensure_remote = real_ensure
 
 
+
+# ───────── 6. 仓库里本来就有的文件不许被删（真机反馈的 P0）─────────
+
+def test_foreign_files(tmp: Path, bare: Path) -> None:
+    """绑到一个**已经有内容**的仓库时，仓库里的其他文件必须原封不动。
+
+    推送的机制是「清空工作区 → 按白名单重建」，于是「上次提交里有、这次没重建
+    出来」的路径在本次提交里就是一条删除。以前这些删除会落进兜底桶、被显示成
+    「自动生成的文档站 N 个文件」—— 用户的 LICENSE / tools/ / 手写 .md 被删掉时，
+    界面上看起来像文档站在更新（真机反馈查出来的误导）。
+
+    现在的规则：只有**本工具产出过**的文件（配置里的 ``pushed_paths``）才允许被
+    删除；仓库里其他东西一律移出本次提交、保住不动。没有那份记录时保守处理：
+    一次删除都不发生。
+    """
+    print('\n[6] 仓库里本来就有的文件不许被删')
+
+    folder = tmp / '外来文件测试'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / '我的笔记.txt').write_text('第一行\n', encoding='utf-8')
+
+    group = config.new_group(folder)
+    group['id'] = 'foreign'
+    group['repo'] = 'someone/has-content'
+    group['files'] = ['我的笔记.txt']
+
+    def local_remote(path, repo, on_log=None):
+        url = bare.as_uri()
+        if gitops.remote_url(path) != url:
+            gitops.git(path, 'remote', 'remove', 'origin', check=False)
+            gitops.git(path, 'remote', 'add', 'origin', url)
+        return url
+
+    real_ensure = gitops.ensure_remote
+    gitops.ensure_remote = local_remote
+    account = {'login': 'freedom0213', 'id': 1}
+    quiet = lambda *_a: None                                     # noqa: E731
+    try:
+        # ── 先把远端造成「一个有内容的仓库」：里面有别的东西，不是空仓库 ──
+        seed = tmp / 'seed'
+        subprocess.run(['git', 'clone', '-q', bare.as_uri(), str(seed)],
+                       check=True, capture_output=True)
+        (seed / 'LICENSE').write_text('MIT License\n', encoding='utf-8')
+        (seed / 'README.md').write_text('# 我手写的说明\n', encoding='utf-8')
+        (seed / 'requirements.txt').write_text('requests\n', encoding='utf-8')
+        (seed / 'tools').mkdir()
+        (seed / 'tools' / 'sync.py').write_text('print(1)\n', encoding='utf-8')
+        gitops.git(seed, 'add', '-A')
+        gitops.git(seed, '-c', 'user.name=seed', '-c', 'user.email=seed@x',
+                   'commit', '-q', '-m', 'seed')
+        gitops.git(seed, 'push', '-q', 'origin', 'HEAD:main')
+        check('造好了「已有内容的仓库」',
+              {'LICENSE', 'requirements.txt', 'tools/sync.py'} <= set(bare_tree(bare)))
+
+        # 真实流程在这里会先引导用户 Pull 一次（远端领先 → 不允许非快进推送），
+        # 那一步会把工作区对齐到远端。**正因为对齐了，工作区才看得见远端那些文件**，
+        # 于是"这次提交会删掉什么"才有得算 —— 这正是风险真正发生的位置。
+        ws = pipeline.workspace_dir(group)
+        pipeline.prepare_workspace(group, on_log=quiet)
+        gitops.fetch(ws, 'main')
+        gitops.reset_hard(ws, 'origin/main')
+        check('工作区已对齐远端（模拟先 Pull 过一次）',
+              set(gitops.list_tree(ws)) == set(bare_tree(bare)), str(gitops.list_tree(ws)))
+
+        # ── 首次推送：我们的笔记进去，别人的东西一样都不许少 ──
+        staged = pipeline.stage_group(group, on_log=quiet)
+        check('stage_group 成功', staged.ok, staged.detail)
+        check('外来文件被判为「不归本工具管」',
+              set(staged.untouched) == {'LICENSE', 'requirements.txt', 'tools/sync.py'},
+              str(staged.untouched))
+        check('没有归属记录时一个删除都不许发生',
+              staged.removed == [], str(staged.removed))
+        check('外来文件不再混进「站点产物」那一组（以前删除就藏在那里）',
+              not ({'LICENSE', 'requirements.txt', 'tools/sync.py'}
+                   & set(staged.artifact_paths)), str(staged.artifact_paths))
+        check('会被重新生成的同名文件不算「外来」', 'README.md' not in staged.untouched)
+        check('这次要推的东西是有的', staged.has_changes)
+
+        result = push_and_remember(group, message='首次推送', token='x', retries=1,
+                                   account=account, on_log=quiet)
+        check('推送成功', result.ok, f'{result.reason} / {result.detail}')
+        after = set(bare_tree(bare))
+        missing = {'LICENSE', 'requirements.txt', 'tools/sync.py'} - after
+        check('仓库里本来就有的文件全都在（这次修复的核心）',
+              not missing, f'被删掉的是：{sorted(missing)}')
+        check('我们的笔记推上去了', '我的笔记.txt' in after)
+        check('记下了「本工具产出的路径」',
+              '我的笔记.txt' in (group.get('pushed_paths') or []),
+              str(group.get('pushed_paths'))[:120])
+
+        # ── 再推一次（内容有改动），外来文件仍然不许动 ──
+        (folder / '我的笔记.txt').write_text('第一行\n第二行\n', encoding='utf-8')
+        result2 = push_and_remember(group, message='第二次推送', token='x', retries=1,
+                                    account=account, on_log=quiet)
+        check('第二次推送成功', result2.ok, f'{result2.reason} / {result2.detail}')
+        after2 = set(bare_tree(bare))
+        check('第二次推送后外来文件仍然都在',
+              not ({'LICENSE', 'requirements.txt', 'tools/sync.py'} - after2),
+              str(sorted(after2)))
+
+        # ── 有了归属记录之后：取消勾选自己的笔记，它仍应真的从仓库消失 ──
+        (folder / '第二篇.txt').write_text('第二篇\n', encoding='utf-8')
+        g3 = dict(group)
+        g3['files'] = ['我的笔记.txt', '第二篇.txt']
+        r3 = push_and_remember(g3, message='加一篇', token='x', retries=1,
+                               account=account, on_log=quiet)
+        check('加一篇笔记推送成功', r3.ok, r3.detail)
+        check('第二篇的页面也在', '第二篇.md' in bare_tree(bare))
+
+        g4 = dict(g3)
+        g4['files'] = ['我的笔记.txt']          # ← 取消勾选第二篇
+        s4 = pipeline.stage_group(g4, on_log=quiet)
+        check('取消勾选的那篇被判为「我们自己的删除」',
+              set(s4.removed) == {'第二篇.txt', '第二篇.md'}, str(s4.removed))
+        # 外来文件每次推送都会被"保住"一次（它们的删除请求每轮都会被拦下），
+        # 所以理应出现在 untouched 里；关键是它们绝不出现在 removed 里。
+        check('外来文件只是「保住」，没有进删除名单',
+              set(s4.untouched) == {'LICENSE', 'requirements.txt', 'tools/sync.py'}
+              and not (set(s4.untouched) & set(s4.removed)), str(s4.untouched))
+        r4 = push_and_remember(g4, message='去掉第二篇', token='x', retries=1,
+                               account=account, on_log=quiet)
+        check('去掉第二篇的推送成功', r4.ok, r4.detail)
+        tree4 = set(bare_tree(bare))
+        check('取消勾选后它确实从仓库消失（设计意图仍然成立）',
+              '第二篇.txt' not in tree4 and '第二篇.md' not in tree4,
+              str(sorted(tree4)))
+        check('顺手再看一眼：外来文件还在',
+              not ({'LICENSE', 'requirements.txt', 'tools/sync.py'} - tree4))
+
+        # ── 自动推送那条路（不带 keep）也必须挡住外来删除 ──
+        # keep=None 表示"提交全部改动"，是最容易漏掉的一处
+        g5 = dict(g4)
+        g5['pushed_paths'] = list(g4.get('pushed_paths') or [])
+        (folder / '我的笔记.txt').write_text('第一行\n第二行\n第三行\n', encoding='utf-8')
+        st5 = pipeline.stage_group(g5, on_log=quiet)
+        res5 = pipeline.finalize_push(g5, st5, message='一键直推', token='x',
+                                      keep=None, retries=1, on_log=quiet)
+        check('不带 keep 的一键直推也成功', res5.ok, res5.detail)
+        tree5 = set(bare_tree(bare))
+        check('一键直推同样不会碰外来文件',
+              not ({'LICENSE', 'requirements.txt', 'tools/sync.py'} - tree5),
+              str(sorted(tree5)))
+    finally:
+        gitops.ensure_remote = real_ensure
+
 def main() -> int:
     print('=' * 66)
     print('FreePushNote 推送链路自测（本地 bare 仓库，不联网）')
@@ -815,6 +975,13 @@ def main() -> int:
     init_pull = gitops.git(bare_pull, 'init', '--bare', '-b', 'main', check=False)
     assert init_pull.returncode == 0, init_pull
     test_pull(bare_pull)
+
+    # 绑一个「本来就有内容」的仓库：外来文件不许被删
+    bare_foreign = _TMP / 'remote_foreign.git'
+    bare_foreign.mkdir(parents=True, exist_ok=True)
+    init_foreign = gitops.git(bare_foreign, 'init', '--bare', '-b', 'main', check=False)
+    assert init_foreign.returncode == 0, init_foreign
+    test_foreign_files(_TMP, bare_foreign)
 
     print('\n' + '=' * 66)
     print(f'通过 {PASS} / {PASS + FAIL}')

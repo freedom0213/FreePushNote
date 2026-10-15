@@ -189,6 +189,15 @@ class PushPanel(QFrame):
     settings_requested = Signal()
     account_chip_clicked = Signal()     # 点头部账号胶囊 → 打开账户页
 
+    @property
+    def push_state(self) -> str:
+        """当前推送按钮处于哪一态（``pending`` = 有改动还没推）。
+
+        对外暴露一个只读口子，是为了让主窗口能在**不重新算一遍**的前提下知道
+        「有没有没推上去的改动」—— 例如关窗时问一句，那里绝不能再去读文件、起 git。
+        """
+        return getattr(self, '_push_state', 'disabled')
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName('PushPanel')

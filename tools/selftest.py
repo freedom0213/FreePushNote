@@ -85,6 +85,30 @@ def test_config() -> None:
               config.workspace_dir(group).name == 'demo'
               and config.workspace_dir(group).parent == config.WORKSPACES_DIR)
 
+        # ── 「本工具产出过哪些路径」这份记录是删除权限的唯一来源 ──
+        # 见 pipeline.stage_group：只有列在这里的文件才允许在后续推送中被删除。
+        check('新分组自带空的 pushed_paths', 'pushed_paths' in group
+              and group['pushed_paths'] == [])
+        config.set_pushed_paths(cfg, 'demo', ['a.txt', 'a.md', 'a.txt', ''])
+        check('pushed_paths 去重且丢掉空值',
+              config.pushed_paths(config.group_by_id(cfg, 'demo')) == ['a.txt', 'a.md'])
+
+        # 换仓库必须清掉这份记录：它描述的是「某个仓库里有我们的哪些文件」，
+        # 换仓库后不成立；留着会让软件以为新仓库里的同名文件是自己的、从而敢删。
+        moved = dict(config.group_by_id(cfg, 'demo') or {})
+        moved['repo'] = 'someone/another-repo'
+        config.upsert_group(cfg, moved)
+        check('换仓库后归属记录被清空',
+              config.pushed_paths(config.group_by_id(cfg, 'demo')) == [])
+
+        config.set_pushed_paths(cfg, 'demo', ['a.txt'])
+        same = dict(config.group_by_id(cfg, 'demo') or {})
+        config.upsert_group(cfg, same)
+        check('仓库没变时归属记录保留',
+              config.pushed_paths(config.group_by_id(cfg, 'demo')) == ['a.txt'])
+        check('没有这份记录时取值为空（保守：一次删除都不发生）',
+              config.pushed_paths({}) == [])
+
         bad = td / 'bad.json'
         bad.write_text('{ not json', encoding='utf-8')
         try:

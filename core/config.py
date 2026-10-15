@@ -243,6 +243,34 @@ def ignored_names(group: dict) -> list[str]:
     return [str(n) for n in (group.get('ignored') or []) if isinstance(n, str)]
 
 
+def pushed_paths(group: dict) -> list[str]:
+    """上一次成功推送后，仓库里由**本工具产出**的路径。
+
+    🔴 这不是缓存、也不是统计，而是**一份归属声明**：只有出现在这里的文件，
+    才允许在后续推送中被删除（比如用户取消勾选某篇笔记，它的原文与生成的页面
+    就该从仓库里消失）。仓库里其他文件——`LICENSE`、`tools/`、手写的 `.md`、
+    `requirements.txt` …… 一律不归本工具管，任何情况下都不动它们。
+
+    没有这份记录时（老版本推过、或从未推过）取值为空，于是**一次删除都不会发生**——
+    保守方向永远是「保住用户的文件」。
+    """
+    return [str(p) for p in (group.get('pushed_paths') or []) if isinstance(p, str)]
+
+
+def set_pushed_paths(cfg: dict, group_id: str, paths: list[str]) -> dict | None:
+    """记住「这次推送后，仓库里哪些文件是本工具产出的」。"""
+    g = group_by_id(cfg, group_id)
+    if g is None:
+        return None
+    seen: list[str] = []
+    for p in paths:
+        p = str(p)
+        if p and p not in seen:
+            seen.append(p)
+    g['pushed_paths'] = seen
+    return g
+
+
 def add_ignored(cfg: dict, group_id: str, names: list[str]) -> dict | None:
     """把若干文件名加进「不再提示」名单（去重、保持原顺序）。"""
     g = group_by_id(cfg, group_id)
@@ -311,10 +339,18 @@ def set_files(cfg: dict, group_id: str, names: list[str]) -> dict | None:
 
 
 def upsert_group(cfg: dict, group: dict) -> dict:
-    """按 id 新增或覆盖一个分组。"""
+    """按 id 新增或覆盖一个分组。
+
+    **换仓库时清掉 pushed_paths**：那份记录说的是「哪个仓库里有我们的哪些文件」，
+    换了仓库就完全不成立 —— 留着它会让软件以为新仓库里那些同名文件是自己的，
+    从而有权删除它们。这类"记录与现实错位"是最容易变成误删的一类 bug。
+    """
     items = groups(cfg)
     for i, g in enumerate(items):
         if g.get('id') == group.get('id'):
+            if str(g.get('repo') or '') != str(group.get('repo') or ''):
+                group = dict(group)
+                group['pushed_paths'] = []
             items[i] = group
             break
     else:
@@ -377,6 +413,11 @@ def new_group(folder: str | os.PathLike, name: str | None = None) -> dict:
         'branch': DEFAULTS['branch'],
         'files': [],
         'ignored': [],
+        #: 上一次成功推送后，仓库里**由本工具产出**的路径。
+        #: 用途只有一个：下次推送时判断「这次提交会删掉的文件」里，哪些是我们自己的人
+        #: （笔记原文 + 它生成的页面 + 站点产物），哪些是仓库里本来就有的别的东西。
+        #: 后一类一律不碰 —— 见 pipeline.stage_group 的注释。
+        'pushed_paths': [],
         'site': True,
         'site_title': label,
         'docs_dir': DEFAULTS['docs_dir'],

@@ -450,6 +450,60 @@ def main() -> int:
         win.toolbar.grab().save(str(out_dir / 'ui_29_toolbar.png'))
         produced.append(out_dir / 'ui_29_toolbar.png')
 
+    def shoot_push_policy() -> None:
+        """P0 修复后的推送确认层（删什么 / 保住什么）+ 状态栏琥珀胶囊 + S-03 卡。"""
+        from types import SimpleNamespace
+        from app.widgets.pushdialog import PushDialog
+        from app.widgets.healthdialog import EncodingHealthDialog
+
+        group = {'id': 'demo', 'name': 'Java八股笔记',
+                 'repo': 'freedom0213/Java-BAGU-notes', 'branch': 'main',
+                 'files': ['Java八股2.txt']}
+        # 用 SimpleNamespace 造一个"整理结果"：数字是摆拍，分组结构是真的
+        staged = SimpleNamespace(
+            ok=True, reason='ok', message='', detail='',
+            workspace=None, files=['Java八股2.txt'],
+            changes=[{'path': 'Java八股2.txt', 'name': 'Java八股2.txt',
+                      'added': 12, 'removed': 3},
+                     {'path': 'Java八股2.md', 'name': 'Java八股2.md',
+                      'added': 40, 'removed': 8},
+                     {'path': 'LICENSE', 'name': 'LICENSE', 'added': 0, 'removed': 21},
+                     {'path': 'tools/sync.py', 'name': 'sync.py', 'added': 0, 'removed': 12}],
+            note_paths={'Java八股2.txt': ['Java八股2.txt', 'Java八股2.md']},
+            artifact_paths=['index.html', '_sidebar.md'],
+            removed=['代码片段.txt', '代码片段.md'],
+            untouched=['LICENSE', 'tools/sync.py', 'requirements.txt'],
+            warnings=[], site_stats=None, has_changes=True,
+            total_added=52, total_removed=11)
+        dlg = PushDialog(group, staged, win)
+        dlg.setModal(False)
+        dlg.show()
+        app.processEvents()
+        p = out_dir / 'ui_30_push_policy.png'
+        dlg.grab().save(str(p))
+        produced.append(p)
+        dlg.reject()
+
+        # ── 状态栏：GBK + CRLF 都异常 → 两颗琥珀胶囊 ──
+        win.statusbar.set_encoding('GBK', warn=True)
+        win.statusbar.set_eol('CRLF', warn=True)
+        app.processEvents()
+        win.statusbar.grab().save(str(out_dir / 'ui_31_statusbar.png'))
+        produced.append(out_dir / 'ui_31_statusbar.png')
+
+        # ── S-03 体检卡 ──
+        card = EncodingHealthDialog(encoding_key='gbk', encoding_name='GBK',
+                                    eol_key='crlf', eol_name='CRLF', parent=win)
+        card.setModal(False)
+        card.show()
+        app.processEvents()
+        p = out_dir / 'ui_32_health.png'
+        card.grab().save(str(p))
+        produced.append(p)
+        card.reject()
+        # 还原状态栏，别让后面的截图带着警告
+        win.statusbar.set_encoding('UTF-8', warn=False)
+        win.statusbar.set_eol('LF', warn=False)
     def shoot_welcome() -> None:
         """V3-10：什么都还没开始时的欢迎态（对比 V3-11 的日常空态）。
 
@@ -506,6 +560,7 @@ def main() -> int:
         shoot_settings()
         shoot_newfiles()
         shoot_history()
+        shoot_push_policy()
 
         dlg = GitHubAuthDialog(win)
         dlg.setModal(False)

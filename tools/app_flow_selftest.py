@@ -38,12 +38,15 @@ from core import config, envprobe, ghauth, gitops, pipeline  # noqa: E402
 from app import account as account_mod  # noqa: E402
 from app.main import build_app  # noqa: E402
 from app.widgets.diffdialog import DiffDialog  # noqa: E402
+from app.widgets.healthdialog import (  # noqa: E402
+    EncodingHealthDialog, needs_conversion, reminder_lines)
 from app.widgets.historydialog import HistoryDialog  # noqa: E402
 from app.widgets.managedialog import ManageFolderDialog  # noqa: E402
 from app.widgets.newfilesdialog import NewFilesDialog  # noqa: E402
 from app.widgets.notice import NoticeDialog  # noqa: E402
 from app.widgets.pushdialog import PushDialog  # noqa: E402
 from app.widgets.sidebar import _close_rect  # noqa: E402
+from app import window as window_mod  # noqa: E402
 from app.window import FreePushWindow  # noqa: E402
 
 # 自绘提示框一律直接返回「确定」：脚本要能无人值守跑完。
@@ -1069,6 +1072,128 @@ def _test_app_icon(win) -> None:
           f'{px.width()}px @ dpr={px.devicePixelRatio()}')
 
 
+def _test_close_guard(win, app) -> None:
+    """关窗时提醒「还有没推上去的改动」（对应 window._guard_unsent_on_close）。"""
+    print('\n[27] 关窗时的未推送提醒')
+
+    def make_ask(answer: bool):
+        seen: list[tuple] = []
+
+        def _ask(_parent, title, body='', **kwargs):
+            seen.append((title, body, kwargs.get('ok_text'),
+                         kwargs.get('cancel_text')))
+            return answer
+
+        return _ask, seen
+
+    real_ask = window_mod.ask
+    real_on_push = win.on_push
+    try:
+        # ① 有改动待推送 → 问一句；选「仍然关闭」→ 放行
+        win.panel.set_push_state('pending')
+        ask_fn, seen = make_ask(False)
+        window_mod.ask = ask_fn
+        check('有未推送改动时会问一句，且不拦关闭',
+              win._guard_unsent_on_close() is False and len(seen) == 1, str(seen))
+        check('提示点明了出处：本地已保存、手机上还看不到',
+              bool(seen) and seen[0][0] == '还有没推上去的改动'
+              and '文档站' in seen[0][1], str(seen))
+
+        # ② 选「先去推送」→ 拦住关闭，并且真的安排一次推送
+        ask_fn2, seen2 = make_ask(True)
+        window_mod.ask = ask_fn2
+        pushed: list[int] = []
+        win.on_push = lambda: pushed.append(1)
+        blocked = win._guard_unsent_on_close()
+        app.processEvents()          # QTimer.singleShot(0) 要转一下事件循环才发出
+        check('选了「先去推送」会拦住关闭', blocked is True)
+        check('并且真的开始推送（不是只把提示关掉）', pushed == [1], str(pushed))
+        check('两个按钮的文案对得上号',
+              bool(seen2) and seen2[0][2] == '先去推送'
+              and seen2[0][3] == '仍然关闭', str(seen2))
+
+        # ③ 没有未推送的改动 → 一个字都不问
+        win.panel.set_push_state('uptodate')
+        ask_fn3, seen3 = make_ask(True)
+        window_mod.ask = ask_fn3
+        check('没有未推送改动时直接放行，不打扰用户',
+              win._guard_unsent_on_close() is False and seen3 == [], str(seen3))
+    finally:
+        win.on_push = real_on_push
+        window_mod.ask = real_ask
+        win._refresh_all()
+
+
+def _test_encoding_health(win) -> None:
+    """编码体检（设计稿 S-03）：状态栏胶囊 + 点开的卡片 + 转换后推送。"""
+    print('\n[28] 编码体检（S-03）')
+
+    def texts_of(widget) -> str:
+        return ' | '.join(w.text() for w in widget.findChildren(QLabel))
+
+    gbk = _TMP / '编码体检.txt'
+    gbk.write_bytes('中文编码体检\n第二行\n'.encode('gbk'))
+    win.load_path(str(gbk))
+
+    check('打开 GBK 文件后状态栏是琥珀胶囊',
+          win.statusbar._encoding.is_warning()
+          and win.statusbar._encoding.value() == 'GBK',
+          f'{win.statusbar._encoding.value()} '
+          f'warn={win.statusbar._encoding.is_warning()}')
+
+    real_exec = EncodingHealthDialog.exec
+    holder: dict = {}
+
+    def keep(self):
+        holder['dlg'] = self
+        return 0
+
+    try:
+        # ① 点胶囊 → 弹出体检卡；「保持原样」什么都不改
+        EncodingHealthDialog.exec = keep
+        win.statusbar.health_clicked.emit()      # 等价于点那个胶囊
+        dlg = holder.get('dlg')
+        check('点胶囊会弹出体检卡', dlg is not None)
+        check('卡片里说清了 GBK 的后果',
+              dlg is not None and '乱码' in texts_of(dlg),
+              texts_of(dlg) if dlg else '')
+        check('选「保持原样」时不做转换',
+              dlg is not None and dlg.convert is False)
+        check('「保持原样」不会动本地文件',
+              gbk.read_bytes().decode('gbk') == '中文编码体检\n第二行\n')
+
+        # ② 「转换后推送」
+        pushed: list[int] = []
+        real_on_push = win.on_push
+        win.on_push = lambda: pushed.append(1)
+
+        def convert(self):
+            self.convert = True
+            return 1
+
+        EncodingHealthDialog.exec = convert
+        win.statusbar.health_clicked.emit()
+        check('「转换后推送」真的触发了推送', pushed == [1], str(pushed))
+        check('本地文件已转成 UTF-8，内容一个字没变',
+              gbk.read_bytes().decode('utf-8') == '中文编码体检\n第二行\n',
+              repr(gbk.read_bytes()[:40]))
+        check('编码状态与状态栏同步更新（胶囊消失）',
+              win._encoding == 'utf-8'
+              and not win.statusbar._encoding.is_warning(),
+              f'{win._encoding} / {win.statusbar._encoding.value()}')
+        win.on_push = real_on_push
+    finally:
+        EncodingHealthDialog.exec = real_exec
+
+    # ③ 纯函数：文案与"要不要转"的分支
+    check('UTF-8 + LF 没有任何可提醒的',
+          reminder_lines('utf-8', 'UTF-8', 'lf') == [])
+    check('只有换行符时也提醒（但那是说明，不是错误）',
+          reminder_lines('utf-8', 'UTF-8', 'crlf')
+          and '本地文件不受影响' in reminder_lines('utf-8', 'UTF-8', 'crlf')[0])
+    check('只有非 UTF-8 才提供"转换"',
+          needs_conversion('gbk') is True and needs_conversion('utf-8') is False)
+
 def main() -> int:  # noqa: C901
     print('=' * 66)
     print('FreePushNote 界面接线自测（offscreen，不联网）')
@@ -1344,6 +1469,8 @@ def main() -> int:  # noqa: C901
     _test_welcome_state(win)
     _test_account_page(win, app)   # 退出登录会清掉账号
     _test_unbind_group(win)        # 放最后：它会删掉分组
+    _test_close_guard(win, app)
+    _test_encoding_health(win)
     _test_app_icon(win)
 
     print('\n' + '=' * 66)

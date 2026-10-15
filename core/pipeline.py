@@ -61,6 +61,9 @@ class PushResult:
     warnings: list[str] = field(default_factory=list)
     site_stats: dict | None = None
     attempts: int = 0
+    #: 推送成功后，仓库里由本工具产出的路径全集 —— 调用方据此更新配置里的
+    #: ``pushed_paths``（记在 core 里会跨线程写配置文件，交给界面层做更稳）
+    produced: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -79,6 +82,13 @@ class StageResult:
     note_paths: dict[str, list[str]] = field(default_factory=dict)
     #: 站点自动产物（首页 / 侧栏 / index.html / assets/*），不单独提供开关
     artifact_paths: list[str] = field(default_factory=list)
+    #: 这次提交会**从仓库里删掉**的文件 —— 都是本工具产出的（见 pushed_paths）
+    removed: list[str] = field(default_factory=list)
+    #: 仓库里**不属于本工具管理**的文件：这次推送本来会把它们删掉，
+    #: 我们刻意保住它们（不进提交）。界面上要如实说明，不能装作没这回事。
+    untouched: list[str] = field(default_factory=list)
+    #: 本次推送后，仓库里由本工具产出的路径全集（成功推送后记进配置）
+    produced: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     site_stats: dict | None = None
     has_changes: bool = False
@@ -270,37 +280,80 @@ def stage_group(group: dict, *, names: list[str] | None = None,
     try:
         gitops.add_all(ws)
         changes = gitops.staged_numstat(ws)
+        index_paths = gitops.list_index(ws)
+        head_paths = gitops.list_tree(ws)
     except gitops.GitError as exc:
         return StageResult(reason=REASON_GIT_ERROR, message='暂存改动失败。',
                            detail=str(exc), warnings=warnings, site_stats=site_stats)
 
-    note_paths, artifact_paths = _split_changes(changes, picked, site_stats)
+    # ── 这次提交会从仓库里删掉哪些文件 ──
+    #
+    # 推送的机制是「清空工作区 → 按白名单重建 → 提交」，所以凡是上次提交里有、
+    # 这次没被重建出来的路径，在这个提交里都是一条删除（见 clear_workspace）。
+    #
+    # 设计意图内的删除只有一种：用户**取消勾选**了某篇笔记（或本地把文件删了），
+    # 它的原文与生成的页面就该从仓库消失。而如果这个文件夹被绑到一个**本来就有
+    # 内容**的仓库，同样的机制会把仓库里的 LICENSE、tools/、手写的 .md、
+    # requirements.txt 也一起删掉 —— 那不是用户想要的，纯粹是机制的副作用。
+    #
+    # 判据用配置里的 ``pushed_paths``（上一次推送后本工具产出的路径全集）：
+    #   · 在里面 → 是我们自己的东西，删除照旧（设计意图）
+    #   · 不在里面 → 仓库里本来就有、不归本工具管的文件，**一律保住**
+    # 没有这份记录时（老版本推过 / 从未推过）保守处理：一次删除都不发生。
+    index_set = set(index_paths)
+    deleted = [p for p in head_paths if p not in index_set]
+    owned = set(config.pushed_paths(group))
+    removed = [p for p in deleted if p in owned]
+    untouched = [p for p in deleted if p not in owned]
+    if removed:
+        log(f'将从仓库移除 {len(removed)} 个文件：' + '、'.join(removed[:5]))
+    if untouched:
+        log(f'仓库里另有 {len(untouched)} 个不属于本工具管理的文件，本次不会改动：'
+            + '、'.join(untouched[:5]) + ('…' if len(untouched) > 5 else ''))
+
+    note_paths, artifact_paths = _split_changes(
+        changes, picked, site_stats, skip=set(removed) | set(untouched))
+    # 「有没有要推的东西」只看我们自己的改动：一个外来文件都没有要删的时候，
+    # 不该说「有改动待推送」（否则用户会以为自己的笔记变了）
+    real_changes = [c for c in changes if c.get('path') not in set(untouched)]
     # reason 必须显式写：这个字段的**默认值是 REASON_GIT_ERROR**（给「不 ok」
     # 的结果兜底用），成功路径漏传就会变成「ok=True 但 reason=git_error」——
     # 字段说谎是最难查的一类问题，日志里一眼看到才发现。
     return StageResult(ok=True, reason=REASON_OK, workspace=ws, files=picked,
                        changes=changes,
-                       has_changes=bool(changes), warnings=warnings,
+                       has_changes=bool(real_changes), warnings=warnings,
                        site_stats=site_stats, note_paths=note_paths,
-                       artifact_paths=artifact_paths)
+                       artifact_paths=artifact_paths,
+                       removed=removed, untouched=untouched,
+                       produced=index_paths)
 
 
 def _split_changes(changes: list[dict], picked: list[str],
-                   site_stats: dict | None) -> tuple[dict[str, list[str]], list[str]]:
+                   site_stats: dict | None,
+                   skip: set[str] | None = None) -> tuple[dict[str, list[str]], list[str]]:
     """把变更清单分成「属于哪篇笔记」和「站点自动产物」两组。
 
     界面要让用户按**笔记**来勾选，而不是按一堆生成的 ``.md`` / ``assets/*``。
     所以这里把每篇笔记自己（``x.txt``）和它的页面（``<slug>.md``）归到一起，
     其余（首页 / 侧栏 / index.html / 资源）算自动产物，不单独提供开关。
+
+    ``skip`` 里的路径**不进任何一组**：它们是「这次提交会从仓库删掉的文件」，
+    由调用方单独成组展示（:class:`StageResult` 的 ``removed`` / ``untouched``）。
+    这一点很要紧 —— 以前这些删除会落进 ``artifact_paths`` 这个兜底桶，
+    在界面上被显示成「自动生成的文档站 N 个文件」，等于把「删掉你的 LICENSE」
+    伪装成了别的东西（真机反馈里查出来的误导）。
     """
     slugs = (site_stats or {}).get('slugs') or {}
     page_owner = {f'{slug}.md': src for src, slug in slugs.items()}
     note_set = set(picked)
+    skip = skip or set()
 
     note_paths: dict[str, list[str]] = {}
     artifact_paths: list[str] = []
     for c in changes:
         name, path = c.get('name', ''), c.get('path', '')
+        if path in skip:
+            continue
         if name in note_set:
             note_paths.setdefault(name, []).append(path)
         elif page_owner.get(Path(path).name):
@@ -338,9 +391,31 @@ def finalize_push(group: dict, staged: 'StageResult', *, message: str | None = N
         return PushResult(ok=True, reason=REASON_NO_CHANGES,
                           message='本地内容与 GitHub 一致，没有需要推送的改动。',
                           files=staged.files, warnings=staged.warnings,
-                          site_stats=staged.site_stats)
+                          site_stats=staged.site_stats,
+                          produced=list(staged.produced or []))
 
     ws = staged.workspace
+
+    # 🔴 先把「不归本工具管的文件」无条件移出本次提交。
+    #
+    # 顺序上必须在 keep 之前、且**不能只依赖 keep**：因为「保存后自动推送」
+    # 那条路是不带 keep 的（一键直推），靠 keep 顺带挡住会漏。
+    # 移出暂存区后它们仍留在仓库里（提交里不含这条删除），下次推送再挡一次。
+    #
+    # 极端情况下这里失败就中止整次推送 —— 宁可这次不推，也不能悄悄删掉用户
+    # 仓库里的文件。删错了没有任何本地记录可还原，而"这次没推"用户立刻能看见。
+    if staged.untouched:
+        try:
+            gitops.unstage(ws, list(staged.untouched))
+            log(f'已保住仓库里不属于本工具管理的 {len(staged.untouched)} 个文件，'
+                '本次不会改动它们')
+        except gitops.GitError as exc:
+            log(f'!! 保住仓库里的其他文件失败：{exc}')
+            return PushResult(reason=REASON_GIT_ERROR,
+                              message='为避免误删仓库里不属于本工具管理的文件，'
+                                      '本次推送已中止。',
+                              detail=str(exc), files=staged.files,
+                              warnings=staged.warnings, site_stats=staged.site_stats)
 
     if keep is not None:
         keep_set = {str(p) for p in keep}
@@ -353,7 +428,8 @@ def finalize_push(group: dict, staged: 'StageResult', *, message: str | None = N
             return PushResult(ok=True, reason=REASON_NO_CHANGES,
                               message='选中的文件没有需要推送的改动。',
                               files=staged.files, warnings=staged.warnings,
-                              site_stats=staged.site_stats)
+                              site_stats=staged.site_stats,
+                              produced=list(staged.produced or []))
 
     commit_message = (message or '').strip() or config.default_commit_message(
         group, staged.files)
@@ -384,7 +460,7 @@ def finalize_push(group: dict, staged: 'StageResult', *, message: str | None = N
     return PushResult(ok=True, reason=REASON_OK, commit=sha,
                       message=f'已推送 {sha}', files=staged.files,
                       warnings=staged.warnings, site_stats=staged.site_stats,
-                      attempts=attempts)
+                      attempts=attempts, produced=list(staged.produced or []))
 
 
 def push_group(group: dict, *, message: str | None = None,

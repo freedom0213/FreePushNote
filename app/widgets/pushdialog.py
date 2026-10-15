@@ -13,6 +13,14 @@
 
 取消勾选某篇笔记 = 这次不提交它的改动，**改动仍然留在本地**，下次推送再带上
 （见 :func:`core.pipeline.finalize_push` 的 ``keep`` 参数）。
+
+「这次提交会删掉哪些文件」是单独一组、必须显式说明的（见 :func:`policy_text`）：
+
+* **本工具产出的**（你取消勾选的笔记原文 + 它生成的页面 + 站点产物）—— 会真的从
+  仓库移除，这是设计意图（否则"撤下来"只是假象，文件还挂在公开仓库上）；
+* **仓库里本来就有的其他文件**（`LICENSE`、`tools/`、手写的 `.md`……）—— **一律不碰**。
+  推送的机制是「清空工作区 → 按白名单重建」，天然会把它们一起删掉；这里刻意把它们
+  移出本次提交。判据是配置里那份「本工具产出过哪些路径」的名单。
 """
 from __future__ import annotations
 
@@ -29,6 +37,30 @@ from .dialogbase import CheckButton, FramedDialog, label, note_box
 def _mono(color: str, size: float, weight: int = 400) -> str:
     return (f'color: {color}; font-size: {size}px; font-weight: {weight};'
             f'font-family: {theme.MONO_STACK};')
+
+
+#: 一次性最多列出几个文件名（多的走省略号 + 悬停提示看全）
+MAX_NAMES = 4
+
+
+def policy_text(removed: list[str], untouched: list[str]) -> str:
+    """确认层底部那段说明。
+
+    单独提成纯函数是为了能被自测直接断言 —— 这段文案是这次改动的核心产物
+    （让"会删什么 / 不动什么"变得可见），不能只靠肉眼看截图。
+    """
+    def _names(paths: list[str]) -> str:
+        head = '、'.join(paths[:MAX_NAMES])
+        return head + (f' 等 {len(paths)} 个' if len(paths) > MAX_NAMES else '')
+
+    lines = ['取消勾选的笔记这次不会推送，改动仍然保留在本地，下次推送再带上。']
+    if removed:
+        lines.append(f'将从仓库移除 {len(removed)} 个文件：{_names(removed)}'
+                     '（本地文件不受影响）')
+    if untouched:
+        lines.append(f'仓库里另有 {len(untouched)} 个不属于本工具管理的文件，'
+                     f'本次不会改动它们：{_names(untouched)}')
+    return '\n'.join(lines)
 
 
 class _ChangeRow(QWidget):
@@ -119,6 +151,21 @@ class PushDialog(FramedDialog):
 
     # ───────────────────────── 构建 ─────────────────────────
 
+    def _plain_row(self, title: str, color: str, value: str,
+                   weight: int = 400) -> QWidget:
+        """一行"不是笔记本体"的汇总：左侧留出复选框的宽度，与上面的笔记行对齐。"""
+        row = QWidget()
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(6, 0, 8, 0)
+        rl.setSpacing(9)
+        spacer = QWidget()
+        spacer.setFixedWidth(20)
+        rl.addWidget(spacer)
+        rl.addWidget(label(title, color, theme.FS_UI, weight), 1)
+        rl.addWidget(label(value, theme.TEXT_FAINT, theme.FS_LABEL, mono=True))
+        row.setFixedHeight(30)
+        return row
+
     def _build(self, repo: str, total_files: int) -> None:
         self.body.addWidget(label(f'这些改动会被推送到 {repo}。',
                                   theme.TEXT_SECOND, theme.FS_TINY, wrap=True))
@@ -185,16 +232,46 @@ class PushDialog(FramedDialog):
             row.setToolTip('随笔记一起生成，不需要单独开关')
             inner.addWidget(row)
 
+        # ── 会被删掉的文件，单独成组 ──
+        #
+        # 这一段是这次改动的主角：推送的机制是「清空工作区 → 按白名单重建」，
+        # 于是「上次提交里有、这次没重建出来」的路径在本次提交里就是一条删除。
+        # 以前这些删除落进上面那个兜底桶，被显示成「自动生成的文档站 N 个文件」——
+        # 用户的 LICENSE 被删掉时，界面上看起来像文档站在更新（真机反馈查出来的）。
+        #
+        # 现在分两类说清楚：我们自己产出的（取消勾选/本地已删）会真的移除；
+        # 仓库里本来就有的其他文件则**一律不碰**。
+        removed = list(getattr(self._staged, 'removed', None) or [])
+        untouched = list(getattr(self._staged, 'untouched', None) or [])
+
+        deleted_rows = 0
+        if removed:
+            deleted_rows += 1
+            row = self._plain_row('将从仓库移除', theme.WARNING,
+                                 f'{len(removed)} 个文件', weight=600)
+            row.setToolTip('这些文件会从仓库里消失：\n' + '\n'.join(removed[:12])
+                           + ('\n…' if len(removed) > 12 else ''))
+            inner.addWidget(row)
+        if untouched:
+            deleted_rows += 1
+            row = self._plain_row('仓库里的其他文件', theme.TEXT_MUTED,
+                                 f'{len(untouched)} 个文件')
+            row.setToolTip('不属于本工具管理，本次不会改动：\n'
+                           + '\n'.join(untouched[:12])
+                           + ('\n…' if len(untouched) > 12 else ''))
+            inner.addWidget(row)
+
         inner.addStretch(1)
         scroll.setWidget(host)
         # 行高 ≈ 31px；不留够高会把最后一行切掉一半
-        rows = max(1, len(self._notes) + artifact_rows)
-        scroll.setFixedHeight(min(232, 31 * rows + 14))
+        rows = max(1, len(self._notes) + artifact_rows + deleted_rows)
+        scroll.setFixedHeight(min(262, 31 * rows + 14))
         self.body.addWidget(scroll)
 
-        self.body.addWidget(note_box(
-            '取消勾选的笔记这次不会推送，改动仍然保留在本地，下次推送再带上。',
-            'info', icon_name='alert-circle'))
+        self._notes_box = note_box(policy_text(removed, untouched),
+                                   'warning' if removed else 'info',
+                                   icon_name='alert-circle')
+        self.body.addWidget(self._notes_box)
 
         self._btn_cancel = self.add_ghost('取消')
         self._btn_cancel.clicked.connect(self.reject)

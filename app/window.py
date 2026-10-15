@@ -49,6 +49,7 @@ from . import account as account_mod, diag, fileio, icons, theme
 from .widgets.accountdialog import AccountDialog
 from .widgets.authdialog import GitHubAuthDialog
 from .widgets.diffdialog import DiffDialog
+from .widgets.healthdialog import EncodingHealthDialog, reminder_lines
 from .widgets.historydialog import HistoryDialog
 from .widgets.editor import CodeEditor
 from .widgets.findbar import FindBar
@@ -428,6 +429,8 @@ class FreePushWindow(QWidget):
         inner.addWidget(center, 1)
 
         self.statusbar = StatusBar()
+        # 状态栏的编码 / 换行胶囊被点开 → 讲清后果并给一个出口（设计稿 S-03）
+        self.statusbar.health_clicked.connect(self.open_encoding_health)
         inner.addWidget(self.statusbar)
 
     def _build_shortcuts(self) -> None:
@@ -599,9 +602,37 @@ class FreePushWindow(QWidget):
             if not self.save_file():
                 event.ignore()
                 return
+        if self._guard_unsent_on_close():
+            event.ignore()
+            return
         self._save_recent()
         self._save_ui_state()
         super().closeEvent(event)
+
+    def _guard_unsent_on_close(self) -> bool:
+        """关窗前提醒还有没推上去的改动。返回 True 表示「先别关」。
+
+        为什么值得拦一下：笔记的"保存"和"推送"是两件事，关窗只保证前者。
+        用户以为「写完了」，其实这篇还停在本地 —— 而它的下一站（手机上的文档站）
+        还看不到新内容。这是这个软件里唯一一处「内容没丢、但你想要的结果没发生」
+        的落差，说一句比不说好。
+
+        判定读的是**已经算好的界面状态**，不在这里起 git 进程：关窗是按下 ✕ 的
+        那一刻，任何 IO 都会变成"点了没反应"。真正的比对在刷新界面时就做完了。
+        """
+        if self.panel.push_state != 'pending':
+            return False
+        if self._push_busy or self._push_silent:
+            return False          # 正在推/自动推送模式，别再插一个框
+        if not ask(self, '还有没推上去的改动',
+                   '这一篇的改动已经保存在本地，但还没推送到 GitHub —— '
+                   '手机上的文档站还看不到它。\n\n'
+                   '现在推送一次，还是先关掉？',
+                   ok_text='先去推送', cancel_text='仍然关闭', kind='warning'):
+            return False
+        # 不在这里直接跑推送（它会弹确认层、联网），等这一轮事件处理完再走正常流程
+        QTimer.singleShot(0, self.on_push)
+        return True
 
     # ───────────────────────── 最近打开 ─────────────────────────
 
@@ -1201,9 +1232,16 @@ class FreePushWindow(QWidget):
             # 文案写死在这里，**不要**用 staged.message ——
             # 整理成功但没有变更时，那个字段是空的（stage_group 只在失败分支
             # 填它），照搬过来就是一个只有图标和 OK 的空框，等于什么也没说。
-            notice(self, '无需推送',
-                   '本地内容与 GitHub 上的一致，没有需要推送的改动。',
-                   kind='info')
+            text = '本地内容与 GitHub 上的一致，没有需要推送的改动。'
+            untouched = list(getattr(staged, 'untouched', None) or [])
+            if untouched:
+                # 有外来文件被保住时必须说一句：用户看到仓库里那些文件还在，
+                # 而我们刚刚"什么也没推"，不说清楚就会被当成没生效。
+                text += (f'\n\n仓库里另有 {len(untouched)} 个不属于本工具管理的文件，'
+                         '本次没有改动它们：\n'
+                         + '、'.join(untouched[:6])
+                         + ('…' if len(untouched) > 6 else ''))
+            notice(self, '无需推送', text, kind='info')
             return
 
         group = self._push_group or self._current_group() or {}
@@ -1245,6 +1283,10 @@ class FreePushWindow(QWidget):
         self._refresh_all()
 
         if result.ok:
+            # 记下「这个仓库里现在有哪些文件是本工具产出的」—— 供下次推送判断
+            # 「这次提交会删掉的文件」里哪些是我们自己的人、哪些是仓库里本来就有的。
+            # 只有在这份记录里的文件才允许被删除（详见 pipeline.stage_group 的注释）。
+            self._remember_pushed(result)
             # 成功：按钮先亮成绿色，停一下再回落到「已是最新」
             self.panel.set_push_state('success', text=f'已推送 {result.commit}')
             QTimer.singleShot(1800, self._refresh_all)
@@ -1256,6 +1298,28 @@ class FreePushWindow(QWidget):
             return
 
         self._push_failed(result.message, result.detail, result.warnings)
+
+    def _remember_pushed(self, result) -> None:
+        """推送成功后，把「仓库里由本工具产出的路径」记进分组配置。
+
+        这份记录是**删除权限的唯一来源**：只有列在里面的文件，才可能在后续推送中
+        被移除（用户取消勾选某篇笔记时）。仓库里其他东西——`LICENSE`、`tools/`、
+        手写的 `.md`——永远不在名单里，所以永远不会被碰。
+
+        写失败也不影响这次推送：不写只是下次不删任何东西（保守方向）。
+        """
+        paths = list(getattr(result, 'produced', None) or [])
+        group = self._push_group or self._current_group()
+        if not paths or not group or not group.get('id'):
+            return
+        if core_config.set_pushed_paths(self._cfg, str(group['id']), paths) is None:
+            return
+        try:
+            core_config.save(self._cfg)
+            self._cfg_stamp = None       # 让下一次刷新真的去读盘
+            diag.note(f'已记录本工具产出的 {len(paths)} 个路径（删除权限的来源）')
+        except (OSError, core_config.ConfigError) as exc:
+            diag.note(f'!! 记录产出路径失败（不影响本次推送）：{exc}')
 
     def _push_failed(self, message: str, detail: str = '',
                      warnings: list[str] | None = None) -> None:
@@ -1582,6 +1646,42 @@ class FreePushWindow(QWidget):
         if dlg is None:
             return            # 同上：过期结果直接丢掉
         dlg.set_patch(sha, text)
+
+    def open_encoding_health(self) -> None:
+        """状态栏那两项被点开时：讲清后果，给一个出口（设计稿 S-03）。"""
+        if self._current is None or self._editor_stack.currentIndex() != 1:
+            return
+        enc_name = fileio.DISPLAY_NAME.get(self._encoding, self._encoding)
+        eol_name = fileio.EOL_DISPLAY.get(self._eol, self._eol).upper()
+        if not reminder_lines(self._encoding, enc_name, self._eol):
+            return                     # 已经没有可提醒的了（例如刚转换过）
+        dlg = EncodingHealthDialog(encoding_key=self._encoding,
+                                   encoding_name=enc_name, eol_key=self._eol,
+                                   eol_name=eol_name, parent=self)
+        if dlg.exec() != QDialog.Accepted or not dlg.convert:
+            return                     # 「保持原样」：一个字都不改
+        self.convert_encoding_then_push()
+
+    def convert_encoding_then_push(self) -> None:
+        """把当前这篇转成 UTF-8 存盘，然后走一次正常的推送流程。
+
+        只换编码，**不动一个字的正文**：编辑器里的文本本来就是解码后的正确内容，
+        换个编码写出去就是转换。换行符刻意不动 —— 推送时仓库侧统一 LF，
+        改用户的本地文件换行只会让他在别的编辑器里觉得别扭。
+
+        存盘失败就把编码状态还原：状态栏不能显示一个跟磁盘不一致的事实。
+        """
+        if self._current is None:
+            return
+        previous = self._encoding
+        self._encoding = 'utf-8'
+        if not self.save_file():
+            self._encoding = previous
+            self._refresh_encoding()
+            return
+        self._refresh_encoding()
+        diag.note(f'编码已转为 UTF-8：{self._current.name}')
+        self.on_push()
 
     def open_settings(self) -> None:
         """设置页（设计稿 V3-09）。四张卡片：账号 / 受管理的文件夹 / 推送行为 / 关于。"""

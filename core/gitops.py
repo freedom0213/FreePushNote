@@ -337,6 +337,30 @@ def recent_commits(path: str | Path, limit: int = 5) -> list[dict]:
 
 # ---------------------------------------------------------------- 提交 / 推送
 
+def list_index(path: str | Path) -> list[str]:
+    """暂存区（index）里的全部路径 —— 也就是「这次提交会包含哪些文件」。
+
+    用它而不是读工作树：只有暂存区才是提交的真正内容（设计稿 S-01 里
+    用户取消勾选的笔记会被移出暂存区，但仍留在工作区）。
+    """
+    proc = git(path, '-c', 'core.quotepath=false', 'ls-files', check=False)
+    if proc.returncode != 0:
+        return []
+    return [l for l in stdout_of(proc).splitlines() if l.strip()]
+
+
+def list_tree(path: str | Path, rev: str = 'HEAD') -> list[str]:
+    """某个提交里的全部路径（``git ls-tree -r``）。HEAD 还不存在时返回空表。
+
+    与 :func:`list_index` 配对，用来算出「这次提交会从仓库里删掉哪些文件」。
+    """
+    proc = git(path, '-c', 'core.quotepath=false', 'ls-tree', '-r', '--name-only',
+               rev, check=False)
+    if proc.returncode != 0:
+        return []          # 空仓库：没有 HEAD，也就没有可删的东西
+    return [l for l in stdout_of(proc).splitlines() if l.strip()]
+
+
 def add_all(path: str | Path) -> None:
     git(path, 'add', '-A')
 
